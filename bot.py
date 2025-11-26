@@ -1,4 +1,5 @@
 import os
+import pytz
 import logging
 import asyncio
 from datetime import datetime, time, timedelta
@@ -10,6 +11,12 @@ from telegram.ext import (
 import openpyxl
 from openpyxl import Workbook
 import re
+
+# Устанавливаем часовой пояс
+TIMEZONE = pytz.timezone('Europe/Moscow')  # Или ваш часовой пояс
+
+def get_current_time():
+    return datetime.now(TIMEZONE)
 
 # Настройка логирования
 logging.basicConfig(
@@ -374,29 +381,32 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {}
 
-    USER_SETTINGS[user_id]['reminder_time'] = time(hour=hours, minute=minutes)
+    # ✅ ИСПРАВЛЕНО: Создаем время с учетом часового пояса
+    reminder_time = time(hour=hours, minute=minutes)
+    USER_SETTINGS[user_id]['reminder_time'] = reminder_time
     USER_SETTINGS[user_id]['first_name'] = update.message.from_user.first_name or ""
     USER_SETTINGS[user_id]['last_name'] = update.message.from_user.last_name or ""
 
-    # ✅ ИСПРАВЛЕНО: используем глобальный job_queue
+    # ✅ ИСПРАВЛЕНО: Используем глобальный job_queue с правильным временем
     global global_app
     job_queue = global_app.job_queue
     if job_queue:
         for job in job_queue.get_jobs_by_name(str(user_id)):
             job.schedule_removal()
+        
+        # Создаем время с учетом часового пояса
+        job_time = time(hour=hours, minute=minutes, tzinfo=TIMEZONE)
+        
         job_queue.run_daily(
             send_daily_reminder,
-            time=time(hour=hours, minute=minutes),
+            time=job_time,
             days=tuple(range(7)),
             data=user_id,
             name=str(user_id)
         )
-        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d}")
-        # Проверка
-        new_jobs = job_queue.get_jobs_by_name(str(user_id))
-        print(f"🔍 Создано job'ов: {len(new_jobs)}")
+        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d} ({TIMEZONE})")
     else:
-        print("❌ job_queue недоступен — критическая ошибка!")
+        print("❌ job_queue недоступен")
 
     await update.message.reply_text(
         f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
