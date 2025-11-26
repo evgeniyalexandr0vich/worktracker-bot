@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Excel временные файлы
+~$*.xlsx
+
+# Логи
+*.log
+
+# Системные
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+# Временные файлы
+temp/
+tmp/
