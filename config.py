@@ -3,12 +3,26 @@ from datetime import time
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI')
 
-# ✅ Excel файл в созданном Volume
-EXCEL_FILE = "/app/excel_data/work_tracker.xlsx"
+# ✅ Автоматическое определение пути для Railway
+if os.path.exists('/app'):
+    # Production на Railway
+    EXCEL_DIR = "/app/excel_data"
+else:
+    # Локальная разработка
+    EXCEL_DIR = "./excel_data"
+
+# Создаем папку
+os.makedirs(EXCEL_DIR, exist_ok=True)
+EXCEL_FILE = os.path.join(EXCEL_DIR, "work_tracker.xlsx")
 
 DEFAULT_REMINDER_HOUR = 18
 DEFAULT_REMINDER_MINUTE = 0
 USER_SETTINGS = {}
 WELCOMED_USERS = set()
 
-print(f"📁 Excel файл будет сохранен в: {EXCEL_FILE}")
+print("🚀 Конфигурация Work Tracker Bot:")
+print(f"✅ BOT_TOKEN: {'Установлен' if BOT_TOKEN and BOT_TOKEN != '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI' else 'ПРОВЕРЬТЕ НАСТРОЙКИ'}")
+print(f"📁 Используемая папка: {EXCEL_DIR}")
+print(f"💾 Файл данных: {EXCEL_FILE}")
+print(f"🔧 Папка существует: {os.path.exists(EXCEL_DIR)}")
+print(f"🔧 Можно писать в папку: {os.access(EXCEL_DIR, os.W_OK) if os.path.exists(EXCEL_DIR) else 'НЕТ'}")
