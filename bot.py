@@ -34,9 +34,6 @@ WAITING_TIME, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(3)
 # Импорт конфигурации
 from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS
 
-# ✅ Глобальная ссылка на application для доступа к job_queue
-global_app = None
-
 class ExcelManager:
     def __init__(self, filename: str):
         self.filename = filename
@@ -406,18 +403,22 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {}
 
-    # ✅ ВАЖНО: Сохраняем время как объект time (без часового пояса)
+    # Сохраняем настройки
     reminder_time = time(hour=hours, minute=minutes)
     USER_SETTINGS[user_id]['reminder_time'] = reminder_time
     USER_SETTINGS[user_id]['first_name'] = update.message.from_user.first_name or ""
     USER_SETTINGS[user_id]['last_name'] = update.message.from_user.last_name or ""
 
-    # ✅ ИСПРАВЛЕНО: Создаем время с учетом часового пояса для job_queue
-    global global_app
-    job_queue = global_app.job_queue
-    if job_queue:
+    # ✅ ИСПРАВЛЕНИЕ: Используем context.application.job_queue
+    try:
+        job_queue = context.application.job_queue
+        
+        if job_queue is None:
+            raise AttributeError("job_queue is None")
+            
         # Удаляем старые jobs
-        for job in job_queue.get_jobs_by_name(str(user_id)):
+        current_jobs = job_queue.get_jobs_by_name(str(user_id))
+        for job in current_jobs:
             job.schedule_removal()
 
         # Создаем время с часовым поясом
@@ -432,31 +433,33 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
             name=str(user_id)
         )
         
-        # Проверяем что job создана
-        jobs_count = len(job_queue.get_jobs_by_name(str(user_id)))
-        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d}")
-        print(f"🔍 Создано job'ов: {jobs_count}")
-        
-        # Тестовое напоминание через 1 минуту
+        # Тестовое напоминание
         job_queue.run_once(
             send_test_reminder,
-            when=60,  # 60 секунд
+            when=10,
             data=user_id,
-            name=f"test_{user_id}"
+            name=f"test_{user_id}_{datetime.now().timestamp()}"
         )
-        print(f"🧪 Тестовое напоминание запланировано через 1 минуту")
         
-    else:
-        print("❌ job_queue недоступен — критическая ошибка!")
+        print(f"✅ Напоминание установлено для {user_id} на {hours:02d}:{minutes:02d}")
+        
+        await update.message.reply_text(
+            f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
+            f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n\n"
+            f"*Тестовое напоминание придет через 10 секунд* ⏰\n\n"
+            f"Ты всегда можешь изменить время через кнопку '⚙️ Напомнить'",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        
+    except Exception as e:
+        print(f"❌ Ошибка при установке напоминания: {e}")
+        await update.message.reply_text(
+            "❌ Произошла техническая ошибка при установке напоминания. "
+            "Функция напоминаний временно недоступна. Мы работаем над исправлением.",
+            reply_markup=get_main_menu_keyboard()
+        )
 
-    await update.message.reply_text(
-        f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
-        f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n\n"
-        f"*Тестовое напоминание придет через 1 минуту* ⏰\n\n"
-        f"Ты всегда можешь изменить время через кнопку '⚙️ Напомнить'",
-        parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard()
-    )
     return ConversationHandler.END
 
 async def send_test_reminder(context):
@@ -565,24 +568,38 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
 
 def restore_reminders(application: Application):
     job_queue = application.job_queue
+    if not job_queue:
+        print("❌ job_queue недоступен при восстановлении напоминаний")
+        return
+        
     restored_count = 0
     for user_id, settings in USER_SETTINGS.items():
         if 'reminder_time' in settings:
-            for job in job_queue.get_jobs_by_name(str(user_id)):
+            # Удаляем старые jobs
+            current_jobs = job_queue.get_jobs_by_name(str(user_id))
+            for job in current_jobs:
                 job.schedule_removal()
+                
+            # Создаем новое напоминание
+            reminder_time = settings['reminder_time']
+            job_time = time(
+                hour=reminder_time.hour, 
+                minute=reminder_time.minute, 
+                tzinfo=TIMEZONE
+            )
+            
             job_queue.run_daily(
                 send_daily_reminder,
-                time=settings['reminder_time'],
+                time=job_time,
                 days=tuple(range(7)),
                 data=user_id,
                 name=str(user_id)
             )
             restored_count += 1
-            print(f"🔁 Восстановлено напоминание для {user_id} на {settings['reminder_time'].strftime('%H:%M')}")
+            print(f"🔁 Восстановлено напоминание для {user_id} на {reminder_time.strftime('%H:%M')}")
     print(f"✅ Восстановлено {restored_count} напоминаний.")
 
 def main():
-    global global_app
     print("🚀 Запуск Work Tracker Bot...")
     print("📊 Бот для учета рабочего времени")
     print("💾 Excel файл:", EXCEL_FILE)
@@ -590,7 +607,13 @@ def main():
     print("🔔 Система напоминаний активирована")
 
     application = Application.builder().token(BOT_TOKEN).build()
-    global_app = application  # ✅ Сохраняем глобальную ссылку
+
+    # ✅ Диагностика job_queue
+    if application.job_queue:
+        print("✅ Job Queue инициализирован успешно")
+    else:
+        print("❌ Job Queue не инициализирован!")
+        print("⚠️  Напоминания не будут работать")
 
     report_conv_handler = ConversationHandler(
         entry_points=[
