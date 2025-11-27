@@ -130,32 +130,32 @@ class ExcelManager:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
-  def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
-    try:
-        print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
-        print(f"📁 Путь к файлу: {self.filename}")
-        print(f"📝 Данные: {time_range}, {description}")
-        
-        wb = openpyxl.load_workbook(self.filename)
-        sheet_name = self.get_user_sheet(user_id, last_name)
-        sheet = wb[sheet_name]
-        row = sheet.max_row + 1
-        work_hours = self.calculate_work_hours(time_range)
-        current_date = datetime.now().strftime("%d.%m.%Y")
-        
-        sheet[f'A{row}'] = current_date
-        sheet[f'B{row}'] = time_range
-        sheet[f'C{row}'] = description
-        sheet[f'D{row}'] = work_hours
-        
-        wb.save(self.filename)
-        print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
-        return True
-    except Exception as e:
-        print(f"❌ Ошибка при записи в Excel: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+      def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
+        try:
+            print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
+            print(f"📁 Путь к файлу: {self.filename}")
+            print(f"📝 Данные: {time_range}, {description}")
+            
+            wb = openpyxl.load_workbook(self.filename)
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet = wb[sheet_name]
+            row = sheet.max_row + 1
+            work_hours = self.calculate_work_hours(time_range)
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            
+            sheet[f'A{row}'] = current_date
+            sheet[f'B{row}'] = time_range
+            sheet[f'C{row}'] = description
+            sheet[f'D{row}'] = work_hours
+            
+            wb.save(self.filename)
+            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка при записи в Excel: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
