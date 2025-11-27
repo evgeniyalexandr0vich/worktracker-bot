@@ -48,21 +48,19 @@ class ExcelManager:
         if not os.path.exists(filepath):
             return False
         try:
-            # Попытка открыть как ZIP (xlsx — это ZIP)
             with zipfile.ZipFile(filepath, 'r') as zf:
                 return '[Content_Types].xml' in zf.namelist()
         except Exception:
             return False
 
     def _ensure_file_exists(self):
-        """Создает файл если не существует. НЕ удаляет дефолтный лист."""
+        """Создаёт файл, если не существует. НЕ удаляет активный лист."""
         try:
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
                 print(f"✅ Создана папка: {directory}")
 
-            # Проверяем, существует ли файл и валиден ли он
             if os.path.exists(self.filename):
                 if not self._is_valid_excel(self.filename):
                     print(f"⚠️ Файл повреждён: {self.filename}. Удаляем...")
@@ -73,13 +71,11 @@ class ExcelManager:
                     print(f"📊 Размер файла: {file_stats.st_size} байт")
                     return
 
-            # Создаём новый валидный файл
-            print(f"🆕 Создаём новый Excel файл: {self.filename}")
+            # Создаём новый файл с хотя бы одним листом (обязательно!)
             wb = Workbook()
-            # ⚠️ НЕ удаляем активный лист! Без него файл — мусор.
+            # НЕ удаляем активный лист — иначе файл битый!
             wb.save(self.filename)
-            print(f"✅ Новый Excel файл успешно создан: {self.filename}")
-
+            print(f"✅ Создан новый Excel файл: {self.filename}")
             file_stats = os.stat(self.filename)
             print(f"📊 Размер нового файла: {file_stats.st_size} байт")
 
@@ -89,7 +85,7 @@ class ExcelManager:
             traceback.print_exc()
 
     def get_user_sheet(self, user_id: int, last_name: str = ""):
-        """Возвращает или создаёт лист для пользователя"""
+        """Гарантирует существование листа и возвращает его имя."""
         try:
             wb = openpyxl.load_workbook(self.filename)
         except Exception as e:
@@ -119,7 +115,6 @@ class ExcelManager:
                 sheet[cell].font = bold_font
             print(f"✅ Создан новый лист: {sheet_name}")
             wb.save(self.filename)
-
         return sheet_name
 
     def calculate_work_hours(self, time_range: str):
@@ -151,9 +146,14 @@ class ExcelManager:
             print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
             print(f"📁 Путь к файлу: {self.filename}")
             print(f"📝 Данные: {time_range}, {description}")
-            wb = openpyxl.load_workbook(self.filename)
+
+            # Сначала гарантируем существование листа
             sheet_name = self.get_user_sheet(user_id, last_name)
+
+            # ВАЖНО: перезагружаем файл, чтобы увидеть новый лист
+            wb = openpyxl.load_workbook(self.filename)
             sheet = wb[sheet_name]
+
             row = sheet.max_row + 1
             work_hours = self.calculate_work_hours(time_range)
             current_date = datetime.now().strftime("%d.%m.%Y")
@@ -172,6 +172,7 @@ class ExcelManager:
 
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
+            # Перезагружаем файл для актуальности
             wb = openpyxl.load_workbook(self.filename)
             sheet_name = self.get_user_sheet(user_id, last_name)
             sheet = wb[sheet_name]
@@ -180,9 +181,7 @@ class ExcelManager:
             print(f"❌ Ошибка при получении статистики: {e}")
             return 0
 
-# Инициализация менеджера Excel
 excel_manager = ExcelManager(EXCEL_FILE)
-
 user_data_cache = {}
 
 def get_main_menu_keyboard():
@@ -192,9 +191,6 @@ def get_main_menu_keyboard():
         ["🔔 Тест напоминания", "📥 Скачать отчет"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
-
-# --- ОСТАЛЬНОЙ КОД БЕЗ ИЗМЕНЕНИЙ (от send_welcome_message до main()) ---
-# (Копируем без изменений из исходного bot.txt, начиная с send_welcome_message)
 
 async def send_welcome_message(update: Update, user):
     welcome_text = (
