@@ -13,7 +13,7 @@ from openpyxl import Workbook
 import re
 
 # ✅ Устанавливаем часовой пояс
-TIMEZONE = pytz.timezone('Europe/Moscow')
+TIMEZONE = pytz.timezone('Europe/Moscow')  # Измените на ваш часовой пояс
 
 def get_current_datetime():
     return datetime.now(TIMEZONE)
@@ -34,76 +34,77 @@ WAITING_TIME, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(3)
 # Импорт конфигурации
 from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS
 
+# ✅ Глобальная ссылка на application для доступа к job_queue
+global_app = None
+
 class ExcelManager:
     def __init__(self, filename: str):
         self.filename = filename
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """Создает файл если не существует"""
+        """Создает файл если не существует и удаляет дефолтный лист"""
         try:
+            # ✅ Создаем папку если не существует
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
                 print(f"✅ Создана папка: {directory}")
 
-            # Всегда создаем новый чистый файл
-            self._create_new_file()
+            if not os.path.exists(self.filename):
+                wb = Workbook()
+                wb.remove(wb.active)
+                wb.save(self.filename)
+                print(f"✅ Создан новый Excel файл: {self.filename}")
+            else:
+                print(f"📁 Excel файл уже существует: {self.filename}")
+                
+            # ✅ Проверяем права доступа
+            if os.path.exists(self.filename):
+                file_stats = os.stat(self.filename)
+                print(f"📊 Размер файла: {file_stats.st_size} байт")
                 
         except Exception as e:
             print(f"❌ Ошибка при создании файла: {e}")
-
-    def _create_new_file(self):
-        """Создает новый Excel файл"""
+            import traceback
+            traceback.print_exc()
+            
+    def get_user_sheet(self, user_id: int, last_name: str = ""):
+        """Возвращает или создает лист для пользователя"""
         try:
-            wb = Workbook()
-            # Оставляем только один лист с названием "default"
-            default_sheet = wb.active
-            default_sheet.title = "default"
-            default_sheet['A1'] = "Work Tracker Bot"
-            default_sheet['A2'] = f"Создан: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-            
-            wb.save(self.filename)
-            print(f"✅ Создан новый Excel файл: {self.filename}")
+            wb = openpyxl.load_workbook(self.filename)
         except Exception as e:
-            print(f"❌ Ошибка при создании файла: {e}")
+            print(f"Ошибка загрузки файла: {e}")
+            self._ensure_file_exists()
+            wb = openpyxl.load_workbook(self.filename)
 
-    def _get_or_create_sheet(self, wb, sheet_name):
-        """Создает лист если не существует и возвращает его"""
-        if sheet_name in wb.sheetnames:
-            return wb[sheet_name]
-        
-        # Создаем новый лист
-        sheet = wb.create_sheet(sheet_name)
-        
-        # Заполняем заголовки
-        sheet['A1'] = "Дата"
-        sheet['B1'] = "Время работы"
-        sheet['C1'] = "Описание работы"
-        sheet['D1'] = "Часы работы без обеда"
-
-        # Настраиваем ширину колонок
-        sheet.column_dimensions['A'].width = 12
-        sheet.column_dimensions['B'].width = 15
-        sheet.column_dimensions['C'].width = 50
-        sheet.column_dimensions['D'].width = 20
-
-        # Жирный шрифт для заголовков
-        bold_font = openpyxl.styles.Font(bold=True)
-        for cell in ['A1', 'B1', 'C1', 'D1']:
-            sheet[cell].font = bold_font
-            
-        return sheet
-
-    def get_user_sheet_name(self, user_id: int, last_name: str = ""):
-        """Генерирует имя листа для пользователя"""
         if last_name and last_name.strip():
-            # Очищаем имя от недопустимых символов
-            sheet_name = ''.join(c for c in last_name.strip() if c.isalnum() or c in (' ', '_', '-'))
-            if sheet_name:
-                return sheet_name[:31]  # Ограничиваем длину
-        
-        return f"user_{user_id}"
+            sheet_name = ''.join(c for c in last_name.strip() if c.isalnum() or c in ' _-')[:31]
+            if not sheet_name:
+                sheet_name = f"user_{user_id}"
+        else:
+            sheet_name = f"user_{user_id}"
+
+        if sheet_name not in wb.sheetnames:
+            sheet = wb.create_sheet(sheet_name)
+            sheet['A1'] = "Дата"
+            sheet['B1'] = "Время работы"
+            sheet['C1'] = "Описание работы"
+            sheet['D1'] = "Часы работы без обеда"
+
+            sheet.column_dimensions['A'].width = 12
+            sheet.column_dimensions['B'].width = 15
+            sheet.column_dimensions['C'].width = 50
+            sheet.column_dimensions['D'].width = 20
+
+            bold_font = openpyxl.styles.Font(bold=True)
+            for cell in ['A1', 'B1', 'C1', 'D1']:
+                sheet[cell].font = bold_font
+
+            print(f"✅ Создан новый лист: {sheet_name}")
+
+        wb.save(self.filename)
+        return sheet_name
 
     def calculate_work_hours(self, time_range: str):
         try:
@@ -135,33 +136,21 @@ class ExcelManager:
             print(f"📁 Путь к файлу: {self.filename}")
             print(f"📝 Данные: {time_range}, {description}")
             
-            # Генерируем имя листа
-            sheet_name = self.get_user_sheet_name(user_id, last_name)
-            print(f"📄 Используем лист: '{sheet_name}'")
-            
-            # Загружаем workbook
             wb = openpyxl.load_workbook(self.filename)
-            print(f"🔍 Доступные листы: {wb.sheetnames}")
-            
-            # Получаем или создаем лист
-            sheet = self._get_or_create_sheet(wb, sheet_name)
-            
-            # Находим следующую строку
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet = wb[sheet_name]
             row = sheet.max_row + 1
             work_hours = self.calculate_work_hours(time_range)
             current_date = datetime.now().strftime("%d.%m.%Y")
             
-            # Записываем данные
             sheet[f'A{row}'] = current_date
             sheet[f'B{row}'] = time_range
             sheet[f'C{row}'] = description
             sheet[f'D{row}'] = work_hours
             
-            # Сохраняем файл
             wb.save(self.filename)
-            print(f"✅ Запись добавлена для пользователя {user_id} на лист '{sheet_name}': {work_hours:.2f} ч.")
+            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
             return True
-            
         except Exception as e:
             print(f"❌ Ошибка при записи в Excel: {e}")
             import traceback
@@ -171,16 +160,15 @@ class ExcelManager:
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
             wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet_name(user_id, last_name)
-            
-            if sheet_name not in wb.sheetnames:
-                return 0
-                
+            sheet_name = self.get_user_sheet(user_id, last_name)
             sheet = wb[sheet_name]
             return sheet.max_row - 1
         except Exception as e:
             print(f"❌ Ошибка при получении статистики: {e}")
             return 0
+
+excel_manager = ExcelManager(EXCEL_FILE)
+user_data_cache = {}
 
 def get_main_menu_keyboard():
     keyboard = [
@@ -338,7 +326,7 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     else:
         await update.message.reply_text(
-            "❌ Произошла ошибка при сохранении. Попробуй позже.",
+            "❌ Произошла ошибка при сохранении. Попробуй еще раз",
             reply_markup=get_main_menu_keyboard()
         )
 
@@ -418,40 +406,119 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {}
 
-    # Сохраняем время напоминания
+    # ✅ ВАЖНО: Сохраняем время как объект time (без часового пояса)
     reminder_time = time(hour=hours, minute=minutes)
     USER_SETTINGS[user_id]['reminder_time'] = reminder_time
     USER_SETTINGS[user_id]['first_name'] = update.message.from_user.first_name or ""
     USER_SETTINGS[user_id]['last_name'] = update.message.from_user.last_name or ""
 
+    # ✅ ИСПРАВЛЕНО: Создаем время с учетом часового пояса для job_queue
+    global global_app
+    job_queue = global_app.job_queue
+    if job_queue:
+        # Удаляем старые jobs
+        for job in job_queue.get_jobs_by_name(str(user_id)):
+            job.schedule_removal()
+
+        # Создаем время с часовым поясом
+        job_time = time(hour=hours, minute=minutes, tzinfo=TIMEZONE)
+        
+        # Добавляем новую job
+        job_queue.run_daily(
+            send_daily_reminder,
+            time=job_time,
+            days=tuple(range(7)),
+            data=user_id,
+            name=str(user_id)
+        )
+        
+        # Проверяем что job создана
+        jobs_count = len(job_queue.get_jobs_by_name(str(user_id)))
+        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d}")
+        print(f"🔍 Создано job'ов: {jobs_count}")
+        
+        # Тестовое напоминание через 1 минуту
+        job_queue.run_once(
+            send_test_reminder,
+            when=60,  # 60 секунд
+            data=user_id,
+            name=f"test_{user_id}"
+        )
+        print(f"🧪 Тестовое напоминание запланировано через 1 минуту")
+        
+    else:
+        print("❌ job_queue недоступен — критическая ошибка!")
+
     await update.message.reply_text(
         f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
         f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n\n"
+        f"*Тестовое напоминание придет через 1 минуту* ⏰\n\n"
         f"Ты всегда можешь изменить время через кнопку '⚙️ Напомнить'",
         parse_mode='Markdown',
         reply_markup=get_main_menu_keyboard()
     )
     return ConversationHandler.END
 
+async def send_test_reminder(context):
+    try:
+        user_id = context.job.data
+        print(f"🧪 Отправка тестового напоминания пользователю {user_id}")
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🧪 *ТЕСТОВОЕ НАПОМИНАНИЕ!*\n\n"
+                 "Это тестовое сообщение чтобы проверить работу напоминаний.\n\n"
+                 "Если ты видишь это сообщение - значит система напоминаний работает правильно! ✅",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        print(f"✅ Тестовое напоминание отправлено пользователю {user_id}")
+    except Exception as e:
+        print(f"❌ Ошибка при отправке тестового напоминания: {e}")
+
+async def send_daily_reminder(context):
+    try:
+        user_id = context.job.data
+        current_time = get_current_datetime().strftime('%H:%M')
+        print(f"⏰ Попытка отправить ежедневное напоминание пользователю {user_id} в {current_time}")
+        
+        reminder_time_str = "18:00"
+        if user_id in USER_SETTINGS and 'reminder_time' in USER_SETTINGS[user_id]:
+            reminder_time_str = USER_SETTINGS[user_id]['reminder_time'].strftime('%H:%M')
+
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n\n"
+                 f"Привет! Пора заполнить отчет о работе за сегодня.\n\n"
+                 f"Нажми кнопку '📝 Отчет' чтобы указать:\n"
+                 f"1️⃣ В какое время ты работал\n"
+                 f"2️⃣ Что ты делал\n\n"
+                 f"Это займет всего 30 секунд! ⏱️",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        print(f"✅ Ежедневное напоминание отправлено пользователю {user_id}")
+    except Exception as e:
+        print(f"❌ Ошибка при отправке напоминания пользователю {user_id}: {e}")
+
 async def manual_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    
-    # Получаем время напоминания пользователя
-    reminder_time_str = "18:00"
-    if user_id in USER_SETTINGS and 'reminder_time' in USER_SETTINGS[user_id]:
-        reminder_time = USER_SETTINGS[user_id]['reminder_time']
-        reminder_time_str = reminder_time.strftime('%H:%M')
+
+    original_job = getattr(context, 'job', None)
+
+    class MockJob:
+        def __init__(self, data):
+            self.data = data
+
+    context.job = MockJob(user_id)
+
+    try:
+        await send_daily_reminder(context)
+    finally:
+        context.job = original_job
 
     await update.message.reply_text(
-        f"🔔 *ТЕСТОВОЕ НАПОМИНАНИЕ!*\n\n"
-        f"Привет! Пора заполнить отчет о работе за сегодня.\n\n"
-        f"⏰ Твое установленное время: *{reminder_time_str}*\n\n"
-        f"Нажми кнопку '📝 Отчет' чтобы добавить запись о работе!",
-        parse_mode='Markdown'
-    )
-    
-    await update.message.reply_text(
-        "✅ Тестовое напоминание отправлено!",
+        "✅ Тестовое напоминание отправлено! Проверь свой чат с ботом.",
         reply_markup=get_main_menu_keyboard()
     )
 
@@ -496,13 +563,34 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=get_main_menu_keyboard()
     )
 
+def restore_reminders(application: Application):
+    job_queue = application.job_queue
+    restored_count = 0
+    for user_id, settings in USER_SETTINGS.items():
+        if 'reminder_time' in settings:
+            for job in job_queue.get_jobs_by_name(str(user_id)):
+                job.schedule_removal()
+            job_queue.run_daily(
+                send_daily_reminder,
+                time=settings['reminder_time'],
+                days=tuple(range(7)),
+                data=user_id,
+                name=str(user_id)
+            )
+            restored_count += 1
+            print(f"🔁 Восстановлено напоминание для {user_id} на {settings['reminder_time'].strftime('%H:%M')}")
+    print(f"✅ Восстановлено {restored_count} напоминаний.")
+
 def main():
+    global global_app
     print("🚀 Запуск Work Tracker Bot...")
     print("📊 Бот для учета рабочего времени")
     print("💾 Excel файл:", EXCEL_FILE)
     print("⏱️ Расчет часов с точностью до 2 знаков")
+    print("🔔 Система напоминаний активирована")
 
     application = Application.builder().token(BOT_TOKEN).build()
+    global_app = application  # ✅ Сохраняем глобальную ссылку
 
     report_conv_handler = ConversationHandler(
         entry_points=[
@@ -542,6 +630,8 @@ def main():
     application.add_handler(reminder_conv_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons))
     application.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
+
+    restore_reminders(application)
 
     print("✅ Бот успешно запущен!")
     print("📱 Ожидаем сообщения от пользователей...")
