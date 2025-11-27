@@ -42,16 +42,30 @@ class ExcelManager:
     def _ensure_file_exists(self):
         """Создает файл если не существует и удаляет дефолтный лист"""
         try:
+            # ✅ Создаем папку если не существует
+            directory = os.path.dirname(self.filename)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+                print(f"✅ Создана папка: {directory}")
+
             if not os.path.exists(self.filename):
                 wb = Workbook()
                 wb.remove(wb.active)
                 wb.save(self.filename)
-                print(f"✅ Создан новый пустой файл: {self.filename}")
+                print(f"✅ Создан новый Excel файл: {self.filename}")
             else:
-                print(f"📁 Файл уже существует: {self.filename}")
+                print(f"📁 Excel файл уже существует: {self.filename}")
+                
+            # ✅ Проверяем права доступа
+            if os.path.exists(self.filename):
+                file_stats = os.stat(self.filename)
+                print(f"📊 Размер файла: {file_stats.st_size} байт")
+                
         except Exception as e:
             print(f"❌ Ошибка при создании файла: {e}")
-
+            import traceback
+            traceback.print_exc()
+            
     def get_user_sheet(self, user_id: int, last_name: str = ""):
         """Возвращает или создает лист для пользователя"""
         try:
@@ -113,24 +127,32 @@ class ExcelManager:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
-    def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
-        try:
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            row = sheet.max_row + 1
-            work_hours = self.calculate_work_hours(time_range)
-            current_date = datetime.now().strftime("%d.%m.%Y")
-            sheet[f'A{row}'] = current_date
-            sheet[f'B{row}'] = time_range
-            sheet[f'C{row}'] = description
-            sheet[f'D{row}'] = work_hours
-            wb.save(self.filename)
-            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка при записи в Excel: {e}")
-            return False
+  def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
+    try:
+        print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
+        print(f"📁 Путь к файлу: {self.filename}")
+        print(f"📝 Данные: {time_range}, {description}")
+        
+        wb = openpyxl.load_workbook(self.filename)
+        sheet_name = self.get_user_sheet(user_id, last_name)
+        sheet = wb[sheet_name]
+        row = sheet.max_row + 1
+        work_hours = self.calculate_work_hours(time_range)
+        current_date = datetime.now().strftime("%d.%m.%Y")
+        
+        sheet[f'A{row}'] = current_date
+        sheet[f'B{row}'] = time_range
+        sheet[f'C{row}'] = description
+        sheet[f'D{row}'] = work_hours
+        
+        wb.save(self.filename)
+        print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка при записи в Excel: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
