@@ -13,7 +13,7 @@ from openpyxl import Workbook
 import re
 
 # ✅ Устанавливаем часовой пояс
-TIMEZONE = pytz.timezone('Europe/Moscow')
+TIMEZONE = pytz.timezone('Europe/Moscow')  # Измените на ваш часовой пояс
 
 def get_current_datetime():
     return datetime.now(TIMEZONE)
@@ -34,6 +34,7 @@ WAITING_TIME, WAITING_LUNCH_CONFIRMATION, WAITING_DESCRIPTION, WAITING_REMINDER_
 # Импорт конфигурации
 from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS
 
+# ✅ Глобальная ссылка на application для доступа к job_queue
 global_app = None
 
 class ExcelManager:
@@ -42,7 +43,7 @@ class ExcelManager:
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """Создаёт файл, если не существует. Оставляем активный лист."""
+        """Создаёт файл, если не существует. НЕ удаляем активный лист."""
         try:
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
@@ -51,7 +52,7 @@ class ExcelManager:
 
             if not os.path.exists(self.filename):
                 wb = Workbook()
-                # НЕ удаляем активный лист — иначе файл битый!
+                # НЕ удаляем активный лист — иначе файл будет битым!
                 wb.save(self.filename)
                 print(f"✅ Создан новый Excel файл: {self.filename}")
             else:
@@ -169,7 +170,6 @@ class ExcelManager:
             print(f"❌ Ошибка при получении статистики: {e}")
             return 0
 
-
 excel_manager = ExcelManager(EXCEL_FILE)
 user_data_cache = {}
 
@@ -183,8 +183,6 @@ def get_main_menu_keyboard():
 
 def get_yes_no_keyboard():
     return ReplyKeyboardMarkup([["Да", "Нет"]], resize_keyboard=True, one_time_keyboard=True)
-
-# --- Все остальные функции без изменений до receive_time ---
 
 async def send_welcome_message(update: Update, user):
     welcome_text = (
@@ -266,7 +264,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 9:00-18:00\n"
         "• 9:00-14:00, 15:00-18:00\n"
         "• с 10 до 12, 14:00-17:30\n"
-        "Используй запятую для разделения периодов.",
+        "Используй запятую для разделения периодов.\n"
+        "*Примечание:* После ввода я уточню, был ли у тебя обед.",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove()
     )
@@ -297,17 +296,15 @@ async def receive_lunch_confirmation(update: Update, context: ContextTypes.DEFAU
     elif text in ["нет", "no", "н"]:
         had_lunch = False
     else:
-        await update.message.reply_text("Пожалуйста, ответь «Да» или «Нет».", reply_markup=get_yes_no_keyboard())
+        await update.message.reply_text("Пожалуйста, выбери «Да» или «Нет».", reply_markup=get_yes_no_keyboard())
         return WAITING_LUNCH_CONFIRMATION
 
     if user_id not in user_data_cache:
         user_data_cache[user_id] = {}
     user_data_cache[user_id]['had_lunch'] = had_lunch
 
-    time_range = user_data_cache[user_id]['time_range']
-    work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
     await update.message.reply_text(
-        f"📝 *ШАГ 2:* Теперь опиши ОПИСАНИЕ РАБОТЫ — что ты делал:\n"
+        "📝 *ШАГ 2:* Теперь опиши ОПИСАНИЕ РАБОТЫ — что ты делал:\n"
         "*Примеры:*\n"
         "• Разрабатывал новый функционал\n"
         "• Участвовал в совещаниях\n"
@@ -323,7 +320,9 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.message.from_user.id
     description = update.message.text
     user = update.message.from_user
-    if user_id not in user_data_cache or 'time_range' not in user_data_cache[user_id] or 'had_lunch' not in user_data_cache[user_id]:
+    if (user_id not in user_data_cache or
+        'time_range' not in user_data_cache[user_id] or
+        'had_lunch' not in user_data_cache[user_id]):
         await update.message.reply_text("❌ Что-то пошло не так. Давай начнем заново", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
 
@@ -363,8 +362,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_data_cache[user_id]
     await update.message.reply_text("❌ Диалог отменен.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
-
-# --- Остальные функции без изменений ---
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
