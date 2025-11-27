@@ -42,85 +42,68 @@ class ExcelManager:
     def _ensure_file_exists(self):
         """Создает файл если не существует"""
         try:
-            # ✅ Создаем папку если не существует
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
                 print(f"✅ Создана папка: {directory}")
 
-            # ✅ Создаем новый файл при каждом запуске для надежности
-            print(f"📁 Создаем новый Excel файл: {self.filename}")
+            # Всегда создаем новый чистый файл
             self._create_new_file()
                 
         except Exception as e:
             print(f"❌ Ошибка при создании файла: {e}")
-            import traceback
-            traceback.print_exc()
-            
+
     def _create_new_file(self):
-        """Создает новый Excel файл с правильной структурой"""
+        """Создает новый Excel файл"""
         try:
             wb = Workbook()
-            # Переименовываем дефолтный лист
+            # Оставляем только один лист с названием "default"
             default_sheet = wb.active
-            default_sheet.title = "default_sheet"
-            default_sheet['A1'] = "Информация"
-            default_sheet['A2'] = "Этот файл создан Work Tracker Bot"
-            default_sheet['A3'] = f"Дата создания: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            default_sheet.title = "default"
+            default_sheet['A1'] = "Work Tracker Bot"
+            default_sheet['A2'] = f"Создан: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
             
             wb.save(self.filename)
             print(f"✅ Создан новый Excel файл: {self.filename}")
         except Exception as e:
             print(f"❌ Ошибка при создании файла: {e}")
-            raise
 
-    def get_user_sheet(self, user_id: int, last_name: str = ""):
-        """Возвращает или создает лист для пользователя"""
-        try:
-            wb = openpyxl.load_workbook(self.filename)
-        except Exception as e:
-            print(f"❌ Ошибка загрузки файла: {e}")
-            # Если файл поврежден, создаем новый
-            self._create_new_file()
-            wb = openpyxl.load_workbook(self.filename)
+    def _get_or_create_sheet(self, wb, sheet_name):
+        """Создает лист если не существует и возвращает его"""
+        if sheet_name in wb.sheetnames:
+            return wb[sheet_name]
+        
+        # Создаем новый лист
+        sheet = wb.create_sheet(sheet_name)
+        
+        # Заполняем заголовки
+        sheet['A1'] = "Дата"
+        sheet['B1'] = "Время работы"
+        sheet['C1'] = "Описание работы"
+        sheet['D1'] = "Часы работы без обеда"
 
-        # Создаем имя листа
+        # Настраиваем ширину колонок
+        sheet.column_dimensions['A'].width = 12
+        sheet.column_dimensions['B'].width = 15
+        sheet.column_dimensions['C'].width = 50
+        sheet.column_dimensions['D'].width = 20
+
+        # Жирный шрифт для заголовков
+        bold_font = openpyxl.styles.Font(bold=True)
+        for cell in ['A1', 'B1', 'C1', 'D1']:
+            sheet[cell].font = bold_font
+            
+        return sheet
+
+    def get_user_sheet_name(self, user_id: int, last_name: str = ""):
+        """Генерирует имя листа для пользователя"""
         if last_name and last_name.strip():
             # Очищаем имя от недопустимых символов
-            sheet_name = ''.join(c for c in last_name.strip() if c.isalnum() or c in (' ', '_', '-'))[:31]
-            if not sheet_name:
-                sheet_name = f"user_{user_id}"
-        else:
-            sheet_name = f"user_{user_id}"
-
-        print(f"🔍 Поиск листа: '{sheet_name}' в {wb.sheetnames}")
-
-        if sheet_name not in wb.sheetnames:
-            print(f"📄 Создаем новый лист: {sheet_name}")
-            sheet = wb.create_sheet(sheet_name)
-            
-            # Заполняем заголовки
-            sheet['A1'] = "Дата"
-            sheet['B1'] = "Время работы"
-            sheet['C1'] = "Описание работы"
-            sheet['D1'] = "Часы работы без обеда"
-
-            # Настраиваем ширину колонок
-            sheet.column_dimensions['A'].width = 12
-            sheet.column_dimensions['B'].width = 15
-            sheet.column_dimensions['C'].width = 50
-            sheet.column_dimensions['D'].width = 20
-
-            # Жирный шрифт для заголовков
-            bold_font = openpyxl.styles.Font(bold=True)
-            for cell in ['A1', 'B1', 'C1', 'D1']:
-                sheet[cell].font = bold_font
-
-            # ✅ ВАЖНО: Сохраняем файл сразу после создания листа
-            wb.save(self.filename)
-            print(f"✅ Создан и сохранен новый лист: {sheet_name}")
-
-        return sheet_name
+            sheet_name = ''.join(c for c in last_name.strip() if c.isalnum() or c in (' ', '_', '-'))
+            if sheet_name:
+                return sheet_name[:31]  # Ограничиваем длину
+        
+        return f"user_{user_id}"
 
     def calculate_work_hours(self, time_range: str):
         try:
@@ -152,20 +135,16 @@ class ExcelManager:
             print(f"📁 Путь к файлу: {self.filename}")
             print(f"📝 Данные: {time_range}, {description}")
             
-            # ✅ Загружаем workbook и получаем имя листа
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
+            # Генерируем имя листа
+            sheet_name = self.get_user_sheet_name(user_id, last_name)
+            print(f"📄 Используем лист: '{sheet_name}'")
             
-            # ✅ Перезагружаем workbook чтобы убедиться что лист существует
+            # Загружаем workbook
             wb = openpyxl.load_workbook(self.filename)
+            print(f"🔍 Доступные листы: {wb.sheetnames}")
             
-            # Проверяем что лист существует
-            if sheet_name not in wb.sheetnames:
-                print(f"❌ Лист '{sheet_name}' не найден в файле")
-                print(f"🔍 Доступные листы: {wb.sheetnames}")
-                return False
-                
-            sheet = wb[sheet_name]
+            # Получаем или создаем лист
+            sheet = self._get_or_create_sheet(wb, sheet_name)
             
             # Находим следующую строку
             row = sheet.max_row + 1
@@ -192,10 +171,8 @@ class ExcelManager:
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
             wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet_name = self.get_user_sheet_name(user_id, last_name)
             
-            # Перезагружаем чтобы убедиться в наличии листа
-            wb = openpyxl.load_workbook(self.filename)
             if sheet_name not in wb.sheetnames:
                 return 0
                 
@@ -204,93 +181,6 @@ class ExcelManager:
         except Exception as e:
             print(f"❌ Ошибка при получении статистики: {e}")
             return 0
-
-    def calculate_work_hours(self, time_range: str):
-        try:
-            time_range_clean = re.sub(r'[с\-\–\—]', ' ', time_range).strip()
-            times = re.findall(r'(\d{1,2}:\d{2}|\d{1,2})', time_range_clean)
-            if len(times) >= 2:
-                start_time = times[0]
-                end_time = times[1]
-                if ':' not in start_time:
-                    start_time += ':00'
-                if ':' not in end_time:
-                    end_time += ':00'
-                start = datetime.strptime(start_time, '%H:%M')
-                end = datetime.strptime(end_time, '%H:%M')
-                if end < start:
-                    end += timedelta(days=1)
-                total_hours = (end - start).total_seconds() / 3600
-                work_hours = total_hours - 0.5
-                result = round(max(work_hours, 0), 2)
-                return result
-            return 0.0
-        except Exception as e:
-            print(f"Ошибка вычисления часов: {e}")
-            return 0.0
-
-    def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
-        try:
-            print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
-            print(f"📁 Путь к файлу: {self.filename}")
-            print(f"📝 Данные: {time_range}, {description}")
-            
-            # Загружаем workbook
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            
-            # Находим следующую строку
-            row = sheet.max_row + 1
-            work_hours = self.calculate_work_hours(time_range)
-            current_date = datetime.now().strftime("%d.%m.%Y")
-            
-            # Записываем данные
-            sheet[f'A{row}'] = current_date
-            sheet[f'B{row}'] = time_range
-            sheet[f'C{row}'] = description
-            sheet[f'D{row}'] = work_hours
-            
-            # Сохраняем файл
-            wb.save(self.filename)
-            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
-            return True
-            
-        except Exception as e:
-            print(f"❌ Ошибка при записи в Excel: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # Пробуем восстановить файл
-            try:
-                print("🔄 Пытаемся восстановить файл...")
-                # Удаляем поврежденный файл
-                if os.path.exists(self.filename):
-                    os.remove(self.filename)
-                    print(f"🗑️ Удален поврежденный файл: {self.filename}")
-                
-                # Создаем новый файл
-                self._create_new_file()
-                print("✅ Создан новый файл")
-                
-                # Пробуем снова добавить запись
-                return self.add_entry(user_id, time_range, description, last_name)
-            except Exception as e2:
-                print(f"❌ Критическая ошибка восстановления: {e2}")
-                return False
-
-    def get_user_stats(self, user_id: int, last_name: str = ""):
-        try:
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            return sheet.max_row - 1
-        except Exception as e:
-            print(f"❌ Ошибка при получении статистики: {e}")
-            return 0
-
-excel_manager = ExcelManager(EXCEL_FILE)
-user_data_cache = {}
 
 def get_main_menu_keyboard():
     keyboard = [
