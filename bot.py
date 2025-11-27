@@ -34,6 +34,9 @@ WAITING_TIME, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(3)
 # Импорт конфигурации
 from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS
 
+# ✅ Глобальная ссылка на application для доступа к job_queue
+global_app = None
+
 class ExcelManager:
     def __init__(self, filename: str):
         self.filename = filename
@@ -127,32 +130,32 @@ class ExcelManager:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
-    def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
-        try:
-            print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
-            print(f"📁 Путь к файлу: {self.filename}")
-            print(f"📝 Данные: {time_range}, {description}")
-            
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            row = sheet.max_row + 1
-            work_hours = self.calculate_work_hours(time_range)
-            current_date = datetime.now().strftime("%d.%m.%Y")
-            
-            sheet[f'A{row}'] = current_date
-            sheet[f'B{row}'] = time_range
-            sheet[f'C{row}'] = description
-            sheet[f'D{row}'] = work_hours
-            
-            wb.save(self.filename)
-            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка при записи в Excel: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+  def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
+    try:
+        print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
+        print(f"📁 Путь к файлу: {self.filename}")
+        print(f"📝 Данные: {time_range}, {description}")
+        
+        wb = openpyxl.load_workbook(self.filename)
+        sheet_name = self.get_user_sheet(user_id, last_name)
+        sheet = wb[sheet_name]
+        row = sheet.max_row + 1
+        work_hours = self.calculate_work_hours(time_range)
+        current_date = datetime.now().strftime("%d.%m.%Y")
+        
+        sheet[f'A{row}'] = current_date
+        sheet[f'B{row}'] = time_range
+        sheet[f'C{row}'] = description
+        sheet[f'D{row}'] = work_hours
+        
+        wb.save(self.filename)
+        print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка при записи в Excel: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
@@ -384,13 +387,10 @@ async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_REMINDER_TIME
 
 async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает установку времени напоминания"""
-    
     user_id = update.message.from_user.id
     user_input = update.message.text.strip()
     time_pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
 
-    # Проверка формата времени
     if not re.match(time_pattern, user_input):
         await update.message.reply_text(
             "❌ *Неверный формат времени!*\n\n"
@@ -403,119 +403,78 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
 
     hours, minutes = map(int, user_input.split(':'))
 
-    # Сохраняем настройки пользователя
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {}
 
+    # ✅ ВАЖНО: Сохраняем время как объект time (без часового пояса)
     reminder_time = time(hour=hours, minute=minutes)
     USER_SETTINGS[user_id]['reminder_time'] = reminder_time
     USER_SETTINGS[user_id]['first_name'] = update.message.from_user.first_name or ""
     USER_SETTINGS[user_id]['last_name'] = update.message.from_user.last_name or ""
-    USER_SETTINGS[user_id]['username'] = update.message.from_user.username or ""
 
-    print(f"⏰ Пользователь {user_id} установил напоминание на {hours:02d}:{minutes:02d}")
-
-    # ✅ Установка напоминания через Job Queue
-    try:
-        application = context.application
-        job_queue = application.job_queue
-        
-        if job_queue is None:
-            # Пробуем создать job_queue если его нет
-            from telegram.ext import JobQueue
-            application.job_queue = JobQueue()
-            application.job_queue.set_application(application)
-            if not application.job_queue.running:
-                application.job_queue.start()
-            job_queue = application.job_queue
-            print("🔧 Job Queue создан в receive_reminder_time")
-        
-        # Удаляем старые jobs для этого пользователя
-        current_jobs = job_queue.get_jobs_by_name(str(user_id))
-        jobs_removed = len(current_jobs)
-        for job in current_jobs:
+    # ✅ ИСПРАВЛЕНО: Создаем время с учетом часового пояса для job_queue
+    global global_app
+    job_queue = global_app.job_queue
+    if job_queue:
+        # Удаляем старые jobs
+        for job in job_queue.get_jobs_by_name(str(user_id)):
             job.schedule_removal()
-        print(f"🗑️ Удалено старых напоминаний: {jobs_removed}")
 
         # Создаем время с часовым поясом
         job_time = time(hour=hours, minute=minutes, tzinfo=TIMEZONE)
         
-        # Добавляем новое ежедневное напоминание
+        # Добавляем новую job
         job_queue.run_daily(
             send_daily_reminder,
             time=job_time,
-            days=tuple(range(7)),  # Все дни недели
+            days=tuple(range(7)),
             data=user_id,
             name=str(user_id)
         )
         
-        # Добавляем тестовое напоминание через 5 секунд
+        # Проверяем что job создана
+        jobs_count = len(job_queue.get_jobs_by_name(str(user_id)))
+        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d}")
+        print(f"🔍 Создано job'ов: {jobs_count}")
+        
+        # Тестовое напоминание через 1 минуту
         job_queue.run_once(
             send_test_reminder,
-            when=5,  # 5 секунд
+            when=60,  # 60 секунд
             data=user_id,
-            name=f"test_{user_id}_{int(datetime.now().timestamp())}"
+            name=f"test_{user_id}"
         )
+        print(f"🧪 Тестовое напоминание запланировано через 1 минуту")
         
-        # Проверяем что job создана
-        new_jobs_count = len(job_queue.get_jobs_by_name(str(user_id)))
-        print(f"✅ Напоминание установлено для {user_id} на {hours:02d}:{minutes:02d}")
-        print(f"🔍 Активных jobs для пользователя: {new_jobs_count}")
-        print(f"📊 Всего jobs в системе: {len(job_queue.jobs())}")
-        
-        # Успешное сообщение пользователю
-        await update.message.reply_text(
-            f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
-            f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n\n"
-            f"*Тестовое напоминание придет через 5 секунд* ⏰\n\n"
-            f"Ты всегда можешь изменить время через кнопку '⚙️ Напомнить'",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-        
-    except Exception as e:
-        print(f"❌ Критическая ошибка при установке напоминания: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Сообщение об ошибке пользователю
-        await update.message.reply_text(
-            "❌ *Произошла техническая ошибка!*\n\n"
-            "Время напоминания сохранено, но автоматические напоминания временно недоступны.\n\n"
-            "Основные функции бота (отчеты, статистика) работают нормально.\n"
-            "Мы уже работаем над исправлением этой проблемы.",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
+    else:
+        print("❌ job_queue недоступен — критическая ошибка!")
 
+    await update.message.reply_text(
+        f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
+        f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n\n"
+        f"*Тестовое напоминание придет через 1 минуту* ⏰\n\n"
+        f"Ты всегда можешь изменить время через кнопку '⚙️ Напомнить'",
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
     return ConversationHandler.END
 
 async def send_test_reminder(context):
-    """Отправляет тестовое напоминание для проверки работы системы"""
     try:
         user_id = context.job.data
         print(f"🧪 Отправка тестового напоминания пользователю {user_id}")
         
-        # Получаем время напоминания пользователя
-        reminder_time_str = "не установлено"
-        if user_id in USER_SETTINGS and 'reminder_time' in USER_SETTINGS[user_id]:
-            reminder_time = USER_SETTINGS[user_id]['reminder_time']
-            reminder_time_str = reminder_time.strftime('%H:%M')
-        
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"🧪 *ТЕСТОВОЕ НАПОМИНАНИЕ!*\n\n"
-                 f"✅ Система напоминаний работает правильно!\n\n"
-                 f"📅 Ваше ежедневное напоминание установлено на: *{reminder_time_str}*\n\n"
-                 f"Каждый день в это время вы будете получать напоминание заполнить отчет о работе.",
+            text="🧪 *ТЕСТОВОЕ НАПОМИНАНИЕ!*\n\n"
+                 "Это тестовое сообщение чтобы проверить работу напоминаний.\n\n"
+                 "Если ты видишь это сообщение - значит система напоминаний работает правильно! ✅",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
         print(f"✅ Тестовое напоминание отправлено пользователю {user_id}")
-        
     except Exception as e:
         print(f"❌ Ошибка при отправке тестового напоминания: {e}")
-        # Не выбрасываем исключение дальше - это тестовое напоминание
 
 async def send_daily_reminder(context):
     try:
@@ -605,88 +564,33 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 def restore_reminders(application: Application):
-    """Восстанавливает напоминания из USER_SETTINGS при запуске бота"""
-    
-    if not application.job_queue:
-        print("❌ job_queue недоступен при восстановлении напоминаний")
-        return
-        
+    job_queue = application.job_queue
     restored_count = 0
-    error_count = 0
-    
-    print(f"🔍 Восстановление напоминаний для {len(USER_SETTINGS)} пользователей...")
-    
     for user_id, settings in USER_SETTINGS.items():
         if 'reminder_time' in settings:
-            try:
-                reminder_time = settings['reminder_time']
-                
-                # Удаляем старые jobs для этого пользователя
-                current_jobs = application.job_queue.get_jobs_by_name(str(user_id))
-                for job in current_jobs:
-                    job.schedule_removal()
-                
-                # Создаем время с часовым поясом
-                job_time = time(
-                    hour=reminder_time.hour, 
-                    minute=reminder_time.minute, 
-                    tzinfo=TIMEZONE
-                )
-                
-                # Создаем новое напоминание
-                application.job_queue.run_daily(
-                    send_daily_reminder,
-                    time=job_time,
-                    days=tuple(range(7)),  # Все дни недели
-                    data=user_id,
-                    name=str(user_id)
-                )
-                
-                restored_count += 1
-                print(f"🔁 Восстановлено напоминание для {user_id} на {reminder_time.strftime('%H:%M')}")
-                
-            except Exception as e:
-                error_count += 1
-                print(f"❌ Ошибка восстановления напоминания для {user_id}: {e}")
-                import traceback
-                traceback.print_exc()
-                
-    print(f"✅ Восстановлено {restored_count} напоминаний, ошибок: {error_count}")
-    
-    # Диагностика после восстановления
-    if application.job_queue:
-        total_jobs = len(application.job_queue.jobs())
-        print(f"📊 Всего jobs в очереди: {total_jobs}")
+            for job in job_queue.get_jobs_by_name(str(user_id)):
+                job.schedule_removal()
+            job_queue.run_daily(
+                send_daily_reminder,
+                time=settings['reminder_time'],
+                days=tuple(range(7)),
+                data=user_id,
+                name=str(user_id)
+            )
+            restored_count += 1
+            print(f"🔁 Восстановлено напоминание для {user_id} на {settings['reminder_time'].strftime('%H:%M')}")
+    print(f"✅ Восстановлено {restored_count} напоминаний.")
 
 def main():
+    global global_app
     print("🚀 Запуск Work Tracker Bot...")
     print("📊 Бот для учета рабочего времени")
     print("💾 Excel файл:", EXCEL_FILE)
     print("⏱️ Расчет часов с точностью до 2 знаков")
     print("🔔 Система напоминаний активирована")
 
-    # ✅ Явно создаем Application с Job Queue
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
-
-    # ✅ Принудительно создаем Job Queue если он не создан
-    if application.job_queue is None:
-        from telegram.ext import JobQueue
-        application.job_queue = JobQueue()
-        application.job_queue.set_application(application)
-        print("🔧 Job Queue создан вручную")
-
-    # ✅ Диагностика job_queue
-    if application.job_queue:
-        print("✅ Job Queue инициализирован успешно")
-        print(f"🔧 Job Queue работает: {application.job_queue.running}")
-    else:
-        print("❌ Job Queue не инициализирован!")
-        print("⚠️  Напоминания не будут работать")
+    application = Application.builder().token(BOT_TOKEN).build()
+    global_app = application  # ✅ Сохраняем глобальную ссылку
 
     report_conv_handler = ConversationHandler(
         entry_points=[
@@ -731,29 +635,12 @@ def main():
 
     print("✅ Бот успешно запущен!")
     print("📱 Ожидаем сообщения от пользователей...")
-    
     try:
-        # ✅ Запускаем job_queue перед polling
-        if application.job_queue and not application.job_queue.running:
-            application.job_queue.start()
-            print("🔔 Job Queue запущен")
-        
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            poll_interval=1.0
-        )
+        application.run_polling()
     except KeyboardInterrupt:
-        print("\n❌ Бот остановлен пользователем")
-        if application.job_queue and application.job_queue.running:
-            application.job_queue.stop()
-            print("🔔 Job Queue остановлен")
+        print("\n❌ Бот остановлен")
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        if application.job_queue and application.job_queue.running:
-            application.job_queue.stop()
+        print(f"❌ Ошибка: {e}")
 
 if __name__ == "__main__":
     main()
