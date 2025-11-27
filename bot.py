@@ -130,7 +130,7 @@ class ExcelManager:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
-      def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
+    def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
         try:
             print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
             print(f"📁 Путь к файлу: {self.filename}")
