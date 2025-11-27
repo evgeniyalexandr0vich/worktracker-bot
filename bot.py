@@ -54,12 +54,20 @@ class ExcelManager:
                     # Пробуем открыть файл чтобы проверить не поврежден ли он
                     wb = openpyxl.load_workbook(self.filename)
                     print(f"✅ Excel файл существует и не поврежден: {self.filename}")
+                    return
                 except Exception as e:
                     print(f"⚠️ Файл поврежден, создаем новый: {e}")
-                    self._create_new_file()
-            else:
-                print(f"📁 Создаем новый Excel файл: {self.filename}")
-                self._create_new_file()
+                    # Создаем backup поврежденного файла
+                    backup_name = f"{self.filename}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    try:
+                        os.rename(self.filename, backup_name)
+                        print(f"✅ Создан backup поврежденного файла: {backup_name}")
+                    except:
+                        pass
+            
+            # Создаем новый файл
+            print(f"📁 Создаем новый Excel файл: {self.filename}")
+            self._create_new_file()
                 
         except Exception as e:
             print(f"❌ Ошибка при создании файла: {e}")
@@ -70,9 +78,14 @@ class ExcelManager:
         """Создает новый Excel файл с правильной структурой"""
         try:
             wb = Workbook()
-            # Удаляем дефолтный лист
-            if 'Sheet' in wb.sheetnames:
-                wb.remove(wb['Sheet'])
+            # ✅ НЕ удаляем дефолтный лист - оставляем хотя бы один лист
+            # Переименовываем дефолтный лист
+            default_sheet = wb.active
+            default_sheet.title = "default_sheet"
+            default_sheet['A1'] = "Информация"
+            default_sheet['A2'] = "Этот файл создан Work Tracker Bot"
+            default_sheet['A3'] = f"Дата создания: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            
             wb.save(self.filename)
             print(f"✅ Создан новый Excel файл: {self.filename}")
         except Exception as e:
@@ -120,8 +133,11 @@ class ExcelManager:
             print(f"❌ Ошибка сохранения файла: {e}")
             # Пробуем сохранить с новым именем
             backup_name = f"{self.filename}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            wb.save(backup_name)
-            print(f"✅ Создан backup файл: {backup_name}")
+            try:
+                wb.save(backup_name)
+                print(f"✅ Создан backup файл: {backup_name}")
+            except:
+                pass
             # Создаем новый основной файл
             self._create_new_file()
             return self.get_user_sheet(user_id, last_name)
@@ -187,7 +203,15 @@ class ExcelManager:
             # Пробуем восстановить файл
             try:
                 print("🔄 Пытаемся восстановить файл...")
+                # Удаляем поврежденный файл
+                if os.path.exists(self.filename):
+                    os.remove(self.filename)
+                    print(f"🗑️ Удален поврежденный файл: {self.filename}")
+                
+                # Создаем новый файл
                 self._create_new_file()
+                print("✅ Создан новый файл")
+                
                 # Пробуем снова добавить запись
                 return self.add_entry(user_id, time_range, description, last_name)
             except Exception as e2:
