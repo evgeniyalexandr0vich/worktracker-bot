@@ -12,11 +12,14 @@ import openpyxl
 from openpyxl import Workbook
 import re
 
-# Устанавливаем часовой пояс
-TIMEZONE = pytz.timezone('Europe/Moscow')  # Или ваш часовой пояс
+# ✅ Устанавливаем часовой пояс
+TIMEZONE = pytz.timezone('Europe/Moscow')  # Измените на ваш часовой пояс
+
+def get_current_datetime():
+    return datetime.now(TIMEZONE)
 
 def get_current_time():
-    return datetime.now(TIMEZONE)
+    return get_current_datetime().time()
 
 # Настройка логирования
 logging.basicConfig(
@@ -403,22 +406,24 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {}
 
-    # ✅ ИСПРАВЛЕНО: Создаем время с учетом часового пояса
+    # ✅ ВАЖНО: Сохраняем время как объект time (без часового пояса)
     reminder_time = time(hour=hours, minute=minutes)
     USER_SETTINGS[user_id]['reminder_time'] = reminder_time
     USER_SETTINGS[user_id]['first_name'] = update.message.from_user.first_name or ""
     USER_SETTINGS[user_id]['last_name'] = update.message.from_user.last_name or ""
 
-    # ✅ ИСПРАВЛЕНО: Используем глобальный job_queue с правильным временем
+    # ✅ ИСПРАВЛЕНО: Создаем время с учетом часового пояса для job_queue
     global global_app
     job_queue = global_app.job_queue
     if job_queue:
+        # Удаляем старые jobs
         for job in job_queue.get_jobs_by_name(str(user_id)):
             job.schedule_removal()
-        
-        # Создаем время с учетом часового пояса
+
+        # Создаем время с часовым поясом
         job_time = time(hour=hours, minute=minutes, tzinfo=TIMEZONE)
         
+        # Добавляем новую job
         job_queue.run_daily(
             send_daily_reminder,
             time=job_time,
@@ -426,22 +431,57 @@ async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TY
             data=user_id,
             name=str(user_id)
         )
-        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d} ({TIMEZONE})")
+        
+        # Проверяем что job создана
+        jobs_count = len(job_queue.get_jobs_by_name(str(user_id)))
+        print(f"✅ Напоминание для {user_id} установлено на {hours:02d}:{minutes:02d}")
+        print(f"🔍 Создано job'ов: {jobs_count}")
+        
+        # Тестовое напоминание через 1 минуту
+        job_queue.run_once(
+            send_test_reminder,
+            when=60,  # 60 секунд
+            data=user_id,
+            name=f"test_{user_id}"
+        )
+        print(f"🧪 Тестовое напоминание запланировано через 1 минуту")
+        
     else:
-        print("❌ job_queue недоступен")
+        print("❌ job_queue недоступен — критическая ошибка!")
 
     await update.message.reply_text(
         f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n\n"
         f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n\n"
+        f"*Тестовое напоминание придет через 1 минуту* ⏰\n\n"
         f"Ты всегда можешь изменить время через кнопку '⚙️ Напомнить'",
         parse_mode='Markdown',
         reply_markup=get_main_menu_keyboard()
     )
     return ConversationHandler.END
 
+async def send_test_reminder(context):
+    try:
+        user_id = context.job.data
+        print(f"🧪 Отправка тестового напоминания пользователю {user_id}")
+        
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🧪 *ТЕСТОВОЕ НАПОМИНАНИЕ!*\n\n"
+                 "Это тестовое сообщение чтобы проверить работу напоминаний.\n\n"
+                 "Если ты видишь это сообщение - значит система напоминаний работает правильно! ✅",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        print(f"✅ Тестовое напоминание отправлено пользователю {user_id}")
+    except Exception as e:
+        print(f"❌ Ошибка при отправке тестового напоминания: {e}")
+
 async def send_daily_reminder(context):
     try:
         user_id = context.job.data
+        current_time = get_current_datetime().strftime('%H:%M')
+        print(f"⏰ Попытка отправить ежедневное напоминание пользователю {user_id} в {current_time}")
+        
         reminder_time_str = "18:00"
         if user_id in USER_SETTINGS and 'reminder_time' in USER_SETTINGS[user_id]:
             reminder_time_str = USER_SETTINGS[user_id]['reminder_time'].strftime('%H:%M')
@@ -457,7 +497,7 @@ async def send_daily_reminder(context):
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
-        print(f"✅ Напоминание успешно отправлено пользователю {user_id}")
+        print(f"✅ Ежедневное напоминание отправлено пользователю {user_id}")
     except Exception as e:
         print(f"❌ Ошибка при отправке напоминания пользователю {user_id}: {e}")
 
