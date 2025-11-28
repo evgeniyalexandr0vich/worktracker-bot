@@ -2,6 +2,7 @@ import os
 import pytz
 import logging
 import asyncio
+import requests
 from datetime import datetime, time, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -13,7 +14,7 @@ from openpyxl import Workbook
 import re
 
 # ✅ Устанавливаем часовой пояс
-TIMEZONE = pytz.timezone('Europe/Moscow')  # Измените на ваш часовой пояс
+TIMEZONE = pytz.timezone('Europe/Moscow')
 
 def get_current_datetime():
     return datetime.now(TIMEZONE)
@@ -32,10 +33,78 @@ logger = logging.getLogger(__name__)
 WAITING_TIME, WAITING_LUNCH_CONFIRMATION, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(4)
 
 # Импорт конфигурации
-from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS, MAX_ENTRIES_PER_DAY
+from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS, MAX_ENTRIES_PER_DAY, YANDEX_DISK_ENABLED, YANDEX_DISK_TOKEN, YANDEX_DISK_FOLDER
 
 # ✅ Глобальная ссылка на application для доступа к job_queue
 global_app = None
+
+class YandexDiskManager:
+    def __init__(self, token: str):
+        self.token = token
+        self.base_url = "https://cloud-api.yandex.net/v1/disk/resources"
+        self.headers = {
+            "Authorization": f"OAuth {token}",
+            "Content-Type": "application/json"
+        }
+
+    def create_folder(self, folder_path: str):
+        """Создает папку на Яндекс.Диске"""
+        try:
+            url = f"{self.base_url}?path={folder_path}"
+            response = requests.put(url, headers=self.headers)
+            if response.status_code in [200, 201, 409]:  # 409 - уже существует
+                print(f"✅ Папка на Яндекс.Диске создана или уже существует: {folder_path}")
+                return True
+            else:
+                print(f"❌ Ошибка создания папки: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            print(f"❌ Ошибка при создании папки: {e}")
+            return False
+
+    def upload_file(self, local_file_path: str, remote_file_path: str):
+        """Загружает файл на Яндекс.Диск"""
+        try:
+            # Получаем URL для загрузки
+            url = f"{self.base_url}/upload?path={remote_file_path}&overwrite=true"
+            response = requests.get(url, headers=self.headers)
+            
+            if response.status_code != 200:
+                print(f"❌ Ошибка получения URL для загрузки: {response.status_code} - {response.text}")
+                return False
+            
+            upload_url = response.json()["href"]
+            
+            # Загружаем файл
+            with open(local_file_path, 'rb') as file:
+                upload_response = requests.put(upload_url, files={"file": file})
+            
+            if upload_response.status_code in [200, 201]:
+                print(f"✅ Файл успешно загружен на Яндекс.Диск: {remote_file_path}")
+                return True
+            else:
+                print(f"❌ Ошибка загрузки файла: {upload_response.status_code} - {upload_response.text}")
+                return False
+                
+        except Exception as e:
+            print(f"❌ Ошибка при загрузке файла: {e}")
+            return False
+
+    def get_file_info(self, file_path: str):
+        """Получает информацию о файле на Яндекс.Диске"""
+        try:
+            url = f"{self.base_url}?path={file_path}"
+            response = requests.get(url, headers=self.headers)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                return None
+        except Exception as e:
+            print(f"❌ Ошибка получения информации о файле: {e}")
+            return None
+
+# ✅ Инициализация менеджера Яндекс.Диска
+yandex_disk = YandexDiskManager(YANDEX_DISK_TOKEN) if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN else None
 
 class ExcelManager:
     def __init__(self, filename: str):
@@ -52,9 +121,11 @@ class ExcelManager:
 
             if not os.path.exists(self.filename):
                 wb = Workbook()
-                # НЕ удаляем активный лист — иначе файл будет битым!
                 wb.save(self.filename)
                 print(f"✅ Создан новый Excel файл: {self.filename}")
+                # Создаем папку на Яндекс.Диске при первом запуске
+                if yandex_disk:
+                    yandex_disk.create_folder(YANDEX_DISK_FOLDER)
             else:
                 print(f"📁 Excel файл уже существует: {self.filename}")
 
@@ -100,10 +171,7 @@ class ExcelManager:
         return sheet_name
 
     def calculate_work_hours(self, time_range: str, had_lunch: bool = False):
-        """
-        Поддерживает несколько периодов, разделённых запятыми.
-        Обед вычитается ТОЛЬКО если had_lunch=True.
-        """
+        """Поддерживает несколько периодов, разделённых запятыми."""
         try:
             total_seconds = 0
             periods = re.split(r',\s*', time_range.strip())
@@ -162,7 +230,6 @@ class ExcelManager:
 
             # Гарантируем существование листа
             sheet_name = self.get_user_sheet(user_id, last_name)
-            # Перезагружаем файл — важно!
             wb = openpyxl.load_workbook(self.filename)
             sheet = wb[sheet_name]
 
@@ -174,6 +241,15 @@ class ExcelManager:
             sheet[f'C{row}'] = description
             sheet[f'D{row}'] = work_hours
             wb.save(self.filename)
+            
+            # ✅ Сохраняем на Яндекс.Диск после добавления записи
+            if yandex_disk:
+                remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
+                if yandex_disk.upload_file(self.filename, remote_file_path):
+                    print(f"✅ Резервная копия загружена на Яндекс.Диск")
+                else:
+                    print(f"⚠️ Не удалось загрузить резервную копию на Яндекс.Диск")
+            
             print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
             return True, "success"
         except Exception as e:
@@ -192,24 +268,28 @@ class ExcelManager:
             current_date = datetime.now().strftime("%d.%m.%Y")
             deleted_data = None
             
-            # Ищем запись за сегодня (с конца)
             for row in range(sheet.max_row, 1, -1):
                 date_cell = sheet[f'A{row}']
                 if date_cell.value == current_date:
-                    # Сохраняем данные удаляемой записи
                     deleted_data = {
                         'date': sheet[f'A{row}'].value,
                         'time_range': sheet[f'B{row}'].value,
                         'description': sheet[f'C{row}'].value,
                         'work_hours': sheet[f'D{row}'].value
                     }
-                    # Удаляем строку
                     sheet.delete_rows(row)
                     wb.save(self.filename)
+                    
+                    # ✅ Сохраняем на Яндекс.Диск после удаления записи
+                    if yandex_disk:
+                        remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
+                        if yandex_disk.upload_file(self.filename, remote_file_path):
+                            print(f"✅ Резервная копия загружена на Яндекс.Диск после удаления")
+                    
                     print(f"✅ Запись за сегодня удалена для пользователя {user_id}")
                     return True, deleted_data
             
-            return False, None  # Не найдено записей за сегодня
+            return False, None
         except Exception as e:
             print(f"❌ Ошибка при удалении записи: {e}")
             return False, None
@@ -231,7 +311,7 @@ def get_main_menu_keyboard():
     keyboard = [
         ["📝 Отчет"],
         ["🗑️ Удалить запись", "⚙️ Напоминание"],
-        ["📥 Скачать отчет"]
+        ["📥 Скачать отчет", "☁️ Синхронизировать"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
 
@@ -239,6 +319,7 @@ def get_yes_no_keyboard():
     return ReplyKeyboardMarkup([["Да", "Нет"]], resize_keyboard=True, one_time_keyboard=True)
 
 async def send_welcome_message(update: Update, user):
+    yandex_status = "✅ ВКЛЮЧЕН" if yandex_disk else "❌ ВЫКЛЮЧЕН"
     welcome_text = (
         "🎉 *ДОБРО ПОЖАЛОВАТЬ!* 🎉\n"
         "🤖 *Я - Work Tracker Bot* 🤖\n"
@@ -248,12 +329,14 @@ async def send_welcome_message(update: Update, user):
         "• Ты указываешь, в какое время работал и что делал\n"
         "• Все данные автоматически сохраняются в Excel таблицу\n"
         "• У каждого сотрудника свой лист в таблице\n"
+        f"• ☁️ *Резервное копирование:* {yandex_status}\n"
         "*Важно:* Можно сделать только *1 запись в день*\n"
         "*Преимущества:*\n"
         "✅ Всегда актуальная информация о работе\n"
         "✅ Удобный учет времени\n"
         "✅ Автоматическое сохранение\n"
         "✅ Индивидуальные настройки\n"
+        "✅ Резервное копирование на Яндекс.Диск\n"
         "Используй кнопки меню ниже для навигации!"
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
@@ -294,12 +377,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         message_text += f"📝 *Сегодняшняя запись:* ❌ ЕЩЕ НЕТ\n"
         
+    yandex_status = "✅ ВКЛЮЧЕНО" if yandex_disk else "❌ ВЫКЛЮЧЕНО"
+    message_text += f"☁️ *Резервное копирование:* {yandex_status}\n\n"
+        
     message_text += (
         f"*Используй кнопки меню для управления:*\n"
         f"📝 *Отчет* - добавить запись о работе\n"
         f"🗑️ *Удалить запись* - удалить сегодняшнюю запись\n"
         f"⚙️ *Напоминание* - изменить время напоминания\n"
-        f"📥 *Скачать отчет* - получить Excel файл"
+        f"📥 *Скачать отчет* - получить Excel файл\n"
+        f"☁️ *Синхронизировать* - принудительно сохранить на Яндекс.Диск"
     )
     await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
@@ -313,6 +400,8 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await reminder_command(update, context)
     elif text == "📥 Скачать отчет":
         return await download_file(update, context)
+    elif text == "☁️ Синхронизировать":
+        return await sync_to_yandex_disk(update, context)
     else:
         await update.message.reply_text("Неизвестная команда. Используй кнопки меню.", reply_markup=get_main_menu_keyboard())
 
@@ -419,8 +508,14 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
         stats = excel_manager.get_user_stats(user_id, last_name)
         current_date = datetime.now().strftime("%d.%m.%Y")
         work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
+        
+        yandex_sync_text = ""
+        if yandex_disk:
+            yandex_sync_text = "☁️ *Данные автоматически сохранены на Яндекс.Диск*\n"
+        
         await update.message.reply_text(
             "🎉 *ОТЛИЧНО! Запись сохранена!*\n"
+            f"{yandex_sync_text}\n"
             f"📅 *Дата:* {current_date}\n"
             f"🕐 *Время работы:* {time_range}\n"
             f"🍽️ *Обед:* {'Да' if had_lunch else 'Нет'}\n"
@@ -430,6 +525,7 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
             "*Теперь ты можешь:*\n"
             "• 🗑️ *Удалить запись* - если нужно исправить\n"
             "• 📥 *Скачать отчет* - получить полный файл\n"
+            "• ☁️ *Синхронизировать* - принудительно сохранить в облако\n"
             "*Новая запись будет доступна завтра*",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
@@ -452,8 +548,13 @@ async def delete_entry_command(update: Update, context: ContextTypes.DEFAULT_TYP
     success, deleted_data = excel_manager.delete_today_entry(user_id, last_name)
     
     if success:
+        yandex_sync_text = ""
+        if yandex_disk:
+            yandex_sync_text = "\n☁️ *Изменения сохранены на Яндекс.Диск*"
+            
         await update.message.reply_text(
-            "🗑️ *Запись за сегодня успешно удалена!*\n\n"
+            "🗑️ *Запись за сегодня успешно удалена!*\n"
+            f"{yandex_sync_text}\n\n"
             f"📅 *Дата:* {deleted_data['date']}\n"
             f"🕐 *Время работы:* {deleted_data['time_range']}\n"
             f"📝 *Описание:* {deleted_data['description']}\n"
@@ -466,6 +567,69 @@ async def delete_entry_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "❌ *Не найдено записей за сегодня для удаления.*\n\n"
             "Сначала создайте запись через кнопку \"📝 Отчет\"",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+
+async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принудительная синхронизация с Яндекс.Диском"""
+    if not yandex_disk:
+        await update.message.reply_text(
+            "❌ *Синхронизация с Яндекс.Диском отключена.*\n\n"
+            "Для включения:\n"
+            "1. Получите OAuth-токен Яндекс.Диск\n"
+            "2. Установите переменную YANDEX_DISK_TOKEN\n"
+            "3. Перезапустите бота",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    await update.message.reply_text(
+        "☁️ *Начинаю синхронизацию с Яндекс.Диском...*",
+        parse_mode='Markdown',
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    try:
+        remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
+        
+        if yandex_disk.upload_file(EXCEL_FILE, remote_file_path):
+            file_info = yandex_disk.get_file_info(remote_file_path)
+            if file_info:
+                file_size = file_info.get('size', 0)
+                modified = file_info.get('modified', '')
+                await update.message.reply_text(
+                    f"✅ *Синхронизация успешно завершена!*\n\n"
+                    f"📊 *Данные файла на Яндекс.Диске:*\n"
+                    f"• 📁 Размер: {int(file_size) / 1024 / 1024:.2f} MB\n"
+                    f"• 📅 Обновлен: {modified[:19] if modified else 'Неизвестно'}\n"
+                    f"• 🔗 Путь: {YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx\n\n"
+                    f"Все данные надежно сохранены в облаке! ☁️",
+                    parse_mode='Markdown',
+                    reply_markup=get_main_menu_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    "✅ *Файл загружен на Яндекс.Диск!*\n\n"
+                    "Резервная копия успешно сохранена в облаке. ☁️",
+                    parse_mode='Markdown',
+                    reply_markup=get_main_menu_keyboard()
+                )
+        else:
+            await update.message.reply_text(
+                "❌ *Ошибка синхронизации!*\n\n"
+                "Не удалось загрузить файл на Яндекс.Диск. "
+                "Проверьте настройки и попробуйте позже.",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu_keyboard()
+            )
+            
+    except Exception as e:
+        print(f"❌ Ошибка при синхронизации: {e}")
+        await update.message.reply_text(
+            "❌ *Произошла ошибка при синхронизации!*\n\n"
+            "Попробуйте позже или проверьте настройки Яндекс.Диска.",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
@@ -608,14 +772,20 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=get_main_menu_keyboard()
             )
             return
+        
+        yandex_status = ""
+        if yandex_disk:
+            yandex_status = "\n☁️ *Резервная копия хранится на Яндекс.Диске*"
+            
         with open(EXCEL_FILE, 'rb') as file:
             await update.message.reply_document(
                 document=file,
                 filename=f"work_reports_{datetime.now().strftime('%d.%m.%Y')}.xlsx",
-                caption="📊 *Вот твой файл с отчетами!*\n"
-                       "Файл содержит все записи о рабочем времени.\n"
-                       "Каждый пользователь имеет свой лист в файле.\n"
-                       "*Ограничение:* 1 запись в день на пользователя",
+                caption=f"📊 *Вот твой файл с отчетами!*\n"
+                       f"Файл содержит все записи о рабочем времени.\n"
+                       f"Каждый пользователь имеет свой лист в файле.\n"
+                       f"*Ограничение:* 1 запись в день на пользователя"
+                       f"{yandex_status}",
                 parse_mode='Markdown',
                 reply_markup=get_main_menu_keyboard()
             )
@@ -634,7 +804,8 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
         "📝 Отчет - добавить запись о работе\n"
         "🗑️ Удалить запись - удалить сегодняшнюю запись\n"
         "⚙️ Напоминание - изменить время напоминания\n"
-        "📥 Скачать отчет - получить Excel файл",
+        "📥 Скачать отчет - получить Excel файл\n"
+        "☁️ Синхронизировать - принудительно сохранить на Яндекс.Диск",
         parse_mode='Markdown',
         reply_markup=get_main_menu_keyboard()
     )
@@ -669,6 +840,7 @@ def main():
     print("💾 Excel файл:", EXCEL_FILE)
     print("⏱️ Поддержка нескольких периодов + выбор обеда")
     print("📝 Ограничение: 1 запись в день на пользователя")
+    print(f"☁️  Яндекс.Диск: {'ВКЛЮЧЕН' if yandex_disk else 'ВЫКЛЮЧЕН'}")
 
     application = Application.builder().token(BOT_TOKEN).build()
     global_app = application
@@ -700,8 +872,10 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("download", download_file))
     application.add_handler(CommandHandler("delete", delete_entry_command))
+    application.add_handler(CommandHandler("sync", sync_to_yandex_disk))
     application.add_handler(MessageHandler(filters.Regex("^(🗑️ Удалить запись)$"), delete_entry_command))
     application.add_handler(MessageHandler(filters.Regex("^(📥 Скачать отчет)$"), download_file))
+    application.add_handler(MessageHandler(filters.Regex("^(☁️ Синхронизировать)$"), sync_to_yandex_disk))
     application.add_handler(report_conv_handler)
     application.add_handler(reminder_conv_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons))
