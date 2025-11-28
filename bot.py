@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Константы для состояний разговора
-WAITING_TIME, WAITING_LUNCH_CONFIRMATION, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(4)
+WAITING_TIME, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(3)
 
 # Импорт конфигурации
 from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS
@@ -43,7 +43,7 @@ class ExcelManager:
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """Создаёт файл, если не существует. НЕ удаляем активный лист."""
+        """Создаёт файл, если не существует. Убираем дефолтный лист."""
         try:
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
@@ -52,7 +52,7 @@ class ExcelManager:
 
             if not os.path.exists(self.filename):
                 wb = Workbook()
-                # НЕ удаляем активный лист — иначе файл будет битым!
+                wb.remove(wb.active)
                 wb.save(self.filename)
                 print(f"✅ Создан новый Excel файл: {self.filename}")
             else:
@@ -99,60 +99,69 @@ class ExcelManager:
         wb.save(self.filename)
         return sheet_name
 
-    def calculate_work_hours(self, time_range: str, had_lunch: bool = False):
-        """
-        Поддерживает несколько периодов, разделённых запятыми.
-        Обед вычитается ТОЛЬКО если had_lunch=True.
-        """
+    def calculate_work_hours(self, time_range: str):
         try:
-            total_seconds = 0
-            periods = re.split(r',\s*', time_range.strip())
-            for period in periods:
-                if not period:
-                    continue
-                clean_period = re.sub(r'[с\-\–\—]', ' ', period).strip()
-                times = re.findall(r'(\d{1,2}:\d{2}|\d{1,2})', clean_period)
-                if len(times) >= 2:
-                    start_str = times[0]
-                    end_str = times[1]
-                    if ':' not in start_str:
-                        start_str += ':00'
-                    if ':' not in end_str:
-                        end_str += ':00'
-                    start = datetime.strptime(start_str, '%H:%M')
-                    end = datetime.strptime(end_str, '%H:%M')
-                    if end < start:
-                        end += timedelta(days=1)
-                    total_seconds += (end - start).total_seconds()
-
-            total_hours = total_seconds / 3600
-            work_hours = total_hours - (0.5 if had_lunch else 0)
-            return round(max(work_hours, 0), 2)
+            time_range_clean = re.sub(r'[с\-\–\—]', ' ', time_range).strip()
+            times = re.findall(r'(\d{1,2}:\d{2}|\d{1,2})', time_range_clean)
+            if len(times) >= 2:
+                start_time = times[0]
+                end_time = times[1]
+                if ':' not in start_time:
+                    start_time += ':00'
+                if ':' not in end_time:
+                    end_time += ':00'
+                start = datetime.strptime(start_time, '%H:%M')
+                end = datetime.strptime(end_time, '%H:%M')
+                if end < start:
+                    end += timedelta(days=1)
+                total_hours = (end - start).total_seconds() / 3600
+                work_hours = total_hours - 0.5
+                result = round(max(work_hours, 0), 2)
+                return result
+            return 0.0
         except Exception as e:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
-    def add_entry(self, user_id: int, time_range: str, description: str, had_lunch: bool, last_name: str = ""):
+    def add_entry(self, user_id: int, time_range: str, description: str, last_name: str = ""):
         try:
             print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
             print(f"📁 Путь к файлу: {self.filename}")
-            print(f"📝 Данные: {time_range}, {description}, обед: {had_lunch}")
+            print(f"📝 Данные: {time_range}, {description}")
 
-            # Гарантируем существование листа
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            # Перезагружаем файл — важно!
             wb = openpyxl.load_workbook(self.filename)
+            sheet_name = self.get_user_sheet(user_id, last_name)
             sheet = wb[sheet_name]
 
-            row = sheet.max_row + 1
-            work_hours = self.calculate_work_hours(time_range, had_lunch)
             current_date = datetime.now().strftime("%d.%m.%Y")
-            sheet[f'A{row}'] = current_date
-            sheet[f'B{row}'] = time_range
-            sheet[f'C{row}'] = description
-            sheet[f'D{row}'] = work_hours
+            target_row = None
+
+            # Ищем строку с сегодняшней датой (начиная с 2-й строки)
+            for row in range(2, sheet.max_row + 1):
+                date_cell = sheet[f'A{row}'].value
+                if date_cell == current_date:
+                    target_row = row
+                    break
+
+            work_hours = self.calculate_work_hours(time_range)
+
+            if target_row:
+                # Перезаписываем существующую строку
+                sheet[f'B{target_row}'] = time_range
+                sheet[f'C{target_row}'] = description
+                sheet[f'D{target_row}'] = work_hours
+                print(f"🔄 Запись за {current_date} обновлена (строка {target_row})")
+            else:
+                # Добавляем новую строку
+                new_row = sheet.max_row + 1
+                sheet[f'A{new_row}'] = current_date
+                sheet[f'B{new_row}'] = time_range
+                sheet[f'C{new_row}'] = description
+                sheet[f'D{new_row}'] = work_hours
+                print(f"🆕 Новая запись добавлена за {current_date} (строка {new_row})")
+
             wb.save(self.filename)
-            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
+            print(f"✅ Запись сохранена для пользователя {user_id}: {work_hours:.2f} ч.")
             return True
         except Exception as e:
             print(f"❌ Ошибка при записи в Excel: {e}")
@@ -165,7 +174,12 @@ class ExcelManager:
             wb = openpyxl.load_workbook(self.filename)
             sheet_name = self.get_user_sheet(user_id, last_name)
             sheet = wb[sheet_name]
-            return sheet.max_row - 1
+            # Считаем только непустые строки с датой
+            count = 0
+            for row in range(2, sheet.max_row + 1):
+                if sheet[f'A{row}'].value:
+                    count += 1
+            return count
         except Exception as e:
             print(f"❌ Ошибка при получении статистики: {e}")
             return 0
@@ -180,9 +194,6 @@ def get_main_menu_keyboard():
         ["🔔 Тест напоминания", "📥 Скачать отчет"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
-
-def get_yes_no_keyboard():
-    return ReplyKeyboardMarkup([["Да", "Нет"]], resize_keyboard=True, one_time_keyboard=True)
 
 async def send_welcome_message(update: Update, user):
     welcome_text = (
@@ -259,13 +270,13 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📝 *Заполним отчет о работе!*\n"
-        "🕐 *ШАГ 1:* Укажи ВРЕМЯ РАБОТЫ (можно несколько периодов):\n"
+        "🕐 *ШАГ 1:* Укажи ВРЕМЯ РАБОТЫ, когда ты работал:\n"
         "*Примеры:*\n"
         "• 9:00-18:00\n"
-        "• 9:00-14:00, 15:00-18:00\n"
-        "• с 10 до 12, 14:00-17:30\n"
-        "Используй запятую для разделения периодов.\n"
-        "*Примечание:* После ввода я уточню, был ли у тебя обед.",
+        "• с 10 до 19\n"
+        "• 14:00-22:30\n"
+        "• 8:30-17:45\n"
+        "*Примечание:* Автоматически вычитается 0.5 часа на обед",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove()
     )
@@ -277,42 +288,18 @@ async def receive_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_data_cache:
         user_data_cache[user_id] = {}
     user_data_cache[user_id]['time_range'] = time_range
-
-    total_hours = excel_manager.calculate_work_hours(time_range, had_lunch=False)
+    work_hours = excel_manager.calculate_work_hours(time_range)
     await update.message.reply_text(
         f"✅ *Отлично!*\n"
-        f"⏱️ *Общее время работы:* {total_hours:.2f} ч.\n"
-        "🍽️ *Был ли у тебя сегодня обед?*\n"
-        "(Обед = вычет 0.5 часа)",
-        reply_markup=get_yes_no_keyboard()
-    )
-    return WAITING_LUNCH_CONFIRMATION
-
-async def receive_lunch_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    text = update.message.text.strip().lower()
-    if text in ["да", "yes", "д"]:
-        had_lunch = True
-    elif text in ["нет", "no", "н"]:
-        had_lunch = False
-    else:
-        await update.message.reply_text("Пожалуйста, выбери «Да» или «Нет».", reply_markup=get_yes_no_keyboard())
-        return WAITING_LUNCH_CONFIRMATION
-
-    if user_id not in user_data_cache:
-        user_data_cache[user_id] = {}
-    user_data_cache[user_id]['had_lunch'] = had_lunch
-
-    await update.message.reply_text(
-        "📝 *ШАГ 2:* Теперь опиши ОПИСАНИЕ РАБОТЫ — что ты делал:\n"
+        f"⏱️ *Рассчитано часов работы:* {work_hours:.2f} ч. (с учетом обеда)\n"
+        "📝 *ШАГ 2:* Теперь опиши ОПИСАНИЕ РАБОТЫ - что ты делал:\n"
         "*Примеры:*\n"
         "• Разрабатывал новый функционал\n"
         "• Участвовал в совещаниях\n"
         "• Изучал документацию\n"
         "• Исправлял ошибки\n"
         "• Общался с клиентами",
-        parse_mode='Markdown',
-        reply_markup=ReplyKeyboardRemove()
+        parse_mode='Markdown'
     )
     return WAITING_DESCRIPTION
 
@@ -320,26 +307,20 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.message.from_user.id
     description = update.message.text
     user = update.message.from_user
-    if (user_id not in user_data_cache or
-        'time_range' not in user_data_cache[user_id] or
-        'had_lunch' not in user_data_cache[user_id]):
+    if user_id not in user_data_cache or 'time_range' not in user_data_cache[user_id]:
         await update.message.reply_text("❌ Что-то пошло не так. Давай начнем заново", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
-
     time_range = user_data_cache[user_id]['time_range']
-    had_lunch = user_data_cache[user_id]['had_lunch']
     last_name = user.last_name or user.first_name or ""
-
-    success = excel_manager.add_entry(user_id, time_range, description, had_lunch, last_name)
+    success = excel_manager.add_entry(user_id, time_range, description, last_name)
     if success:
         stats = excel_manager.get_user_stats(user_id, last_name)
         current_date = datetime.now().strftime("%d.%m.%Y")
-        work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
+        work_hours = excel_manager.calculate_work_hours(time_range)
         await update.message.reply_text(
             "🎉 *ОТЛИЧНО! Запись сохранена!*\n"
             f"📅 *Дата:* {current_date}\n"
             f"🕐 *Время работы:* {time_range}\n"
-            f"🍽️ *Обед:* {'Да' if had_lunch else 'Нет'}\n"
             f"⏱️ *Часы работы без обеда:* {work_hours:.2f} ч.\n"
             f"📝 *Описание работы:* {description}\n"
             f"📊 *Всего записей:* {stats}\n"
@@ -486,9 +467,8 @@ async def send_daily_reminder(context):
             text=f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
                  f"Привет! Пора заполнить отчет о работе за сегодня.\n"
                  f"Нажми кнопку '📝 Отчет' чтобы указать:\n"
-                 f"1️⃣ В какое время ты работал (можно несколько периодов)\n"
-                 f"2️⃣ Был ли обед\n"
-                 f"3️⃣ Что ты делал\n"
+                 f"1️⃣ В какое время ты работал\n"
+                 f"2️⃣ Что ты делал\n"
                  f"Это займет всего 30 секунд! ⏱️",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
@@ -581,7 +561,8 @@ def main():
     print("🚀 Запуск Work Tracker Bot...")
     print("📊 Бот для учета рабочего времени")
     print("💾 Excel файл:", EXCEL_FILE)
-    print("⏱️ Поддержка нескольких периодов + выбор обеда")
+    print("⏱️ Расчет часов с точностью до 2 знаков")
+    print("🔁 Поддержка перезаписи за день")
 
     application = Application.builder().token(BOT_TOKEN).build()
     global_app = application
@@ -593,7 +574,6 @@ def main():
         ],
         states={
             WAITING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_time)],
-            WAITING_LUNCH_CONFIRMATION: [MessageHandler(filters.Regex("^(Да|Нет)$"), receive_lunch_confirmation)],
             WAITING_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_description)],
         },
         fallbacks=[CommandHandler("cancel", cancel)]
