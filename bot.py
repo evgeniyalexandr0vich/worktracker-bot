@@ -42,7 +42,6 @@ class ExcelManager:
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """Создаёт файл, если не существует. Оставляем активный лист."""
         try:
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
@@ -50,7 +49,7 @@ class ExcelManager:
                 print(f"✅ Создана папка: {directory}")
             if not os.path.exists(self.filename):
                 wb = Workbook()
-                # Оставляем лист — иначе файл битый!
+                # НЕ удаляем активный лист — иначе файл будет битым!
                 wb.save(self.filename)
                 print(f"✅ Создан новый Excel файл: {self.filename}")
             else:
@@ -96,23 +95,25 @@ class ExcelManager:
         return sheet_name
 
     def calculate_work_hours(self, time_range: str, had_lunch: bool = False):
+        """Надёжный парсинг нескольких периодов"""
         try:
             total_seconds = 0
-            periods = re.split(r',\s*', time_range.strip())
+            # Разделяем по запятым
+            periods = re.split(r',', time_range)
             for period in periods:
-                if not period:
+                # Удаляем всё, кроме цифр, двоеточий и пробелов
+                clean = re.sub(r'[^\d:\s]', ' ', period).strip()
+                if not clean:
                     continue
-                clean_period = re.sub(r'[с\-\–\—]', ' ', period).strip()
-                times = re.findall(r'(\d{1,2}:\d{2}|\d{1,2})', clean_period)
+                # Ищем все временные метки: H, HH, H:MM, HH:MM
+                times = re.findall(r'\b(\d{1,2})(?::(\d{2}))?\b', clean)
                 if len(times) >= 2:
-                    start_str = times[0]
-                    end_str = times[1]
-                    if ':' not in start_str:
-                        start_str += ':00'
-                    if ':' not in end_str:
-                        end_str += ':00'
-                    start = datetime.strptime(start_str, '%H:%M')
-                    end = datetime.strptime(end_str, '%H:%M')
+                    def to_datetime(t):
+                        h = int(t[0])
+                        m = int(t[1]) if t[1] else 0
+                        return datetime.strptime(f"{h:02}:{m:02}", "%H:%M")
+                    start = to_datetime(times[0])
+                    end = to_datetime(times[1])
                     if end < start:
                         end += timedelta(days=1)
                     total_seconds += (end - start).total_seconds()
@@ -120,7 +121,7 @@ class ExcelManager:
             work_hours = total_hours - (0.5 if had_lunch else 0)
             return round(max(work_hours, 0), 2)
         except Exception as e:
-            print(f"Ошибка вычисления часов: {e}")
+            print(f"Ошибка в calculate_work_hours: {e}")
             return 0.0
 
     def add_entry(self, user_id: int, time_range: str, description: str, had_lunch: bool, last_name: str = ""):
@@ -136,7 +137,7 @@ class ExcelManager:
             current_date = datetime.now().strftime("%d.%m.%Y")
             target_row = None
 
-            # Ищем строку за сегодня (начиная со 2-й строки)
+            # Ищем существующую запись за сегодня (со 2-й строки)
             for row in range(2, sheet.max_row + 1):
                 if sheet[f'A{row}'].value == current_date:
                     target_row = row
@@ -145,13 +146,13 @@ class ExcelManager:
             work_hours = self.calculate_work_hours(time_range, had_lunch)
 
             if target_row:
-                # Перезаписываем существующую запись
+                # Перезаписываем
                 sheet[f'B{target_row}'] = time_range
                 sheet[f'C{target_row}'] = description
                 sheet[f'D{target_row}'] = work_hours
                 print(f"🔄 Обновлена запись за {current_date} (строка {target_row})")
             else:
-                # Добавляем новую строку
+                # Добавляем новую
                 new_row = sheet.max_row + 1
                 sheet[f'A{new_row}'] = current_date
                 sheet[f'B{new_row}'] = time_range
@@ -283,19 +284,27 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def receive_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    time_range = update.message.text
-    if user_id not in user_data_cache:
-        user_data_cache[user_id] = {}
-    user_data_cache[user_id]['time_range'] = time_range
-    total_hours = excel_manager.calculate_work_hours(time_range, had_lunch=False)
-    await update.message.reply_text(
-        f"✅ *Отлично!*\n"
-        f"⏱️ *Общее время работы:* {total_hours:.2f} ч.\n"
-        "🍽️ *Был ли у тебя сегодня обед?*\n"
-        "(Обед = вычет 0.5 часа)",
-        reply_markup=get_yes_no_keyboard()
-    )
-    return WAITING_LUNCH_CONFIRMATION
+    time_range = update.message.text.strip()
+    try:
+        if user_id not in user_data_cache:
+            user_data_cache[user_id] = {}
+        user_data_cache[user_id]['time_range'] = time_range
+        total_hours = excel_manager.calculate_work_hours(time_range, had_lunch=False)
+        await update.message.reply_text(
+            f"✅ *Отлично!*\n"
+            f"⏱️ *Общее время работы:* {total_hours:.2f} ч.\n"
+            "🍽️ *Был ли у тебя сегодня обед?*\n"
+            "(Обед = вычет 0.5 часа)",
+            reply_markup=get_yes_no_keyboard()
+        )
+        return WAITING_LUNCH_CONFIRMATION
+    except Exception as e:
+        print(f"❌ Ошибка в receive_time: {e}")
+        await update.message.reply_text(
+            "❌ Произошла ошибка. Попробуй ввести время ещё раз.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
 
 async def receive_lunch_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -369,7 +378,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Диалог отменен.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
 
-# --- ОСТАЛЬНЫЕ ФУНКЦИИ БЕЗ ИЗМЕНЕНИЙ ---
+# --- ОСТАЛЬНЫЕ ФУНКЦИИ (stats, my_time, reminder, download, напоминания) ---
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
