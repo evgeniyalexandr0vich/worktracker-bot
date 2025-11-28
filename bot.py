@@ -97,10 +97,6 @@ class ExcelManager:
         return sheet_name
 
     def calculate_work_hours(self, time_range: str, had_lunch: bool = False):
-        """
-        Поддерживает несколько периодов, разделённых запятыми.
-        Обед вычитается ТОЛЬКО если had_lunch=True.
-        """
         try:
             total_seconds = 0
             periods = re.split(r',\s*', time_range.strip())
@@ -128,60 +124,23 @@ class ExcelManager:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
-    def has_entry_today(self, user_id: int, last_name: str = "") -> bool:
-        """Проверяет, есть ли запись за сегодня"""
-        try:
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            current_date = datetime.now().strftime("%d.%m.%Y")
-            for row in range(2, sheet.max_row + 1):
-                if sheet[f'A{row}'].value == current_date:
-                    return True
-            return False
-        except Exception as e:
-            print(f"Ошибка при проверке записи: {e}")
-            return False
-
-    def delete_entry_today(self, user_id: int, last_name: str = "") -> bool:
-        """Удаляет запись за сегодня"""
-        try:
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            current_date = datetime.now().strftime("%d.%m.%Y")
-            for row in range(2, sheet.max_row + 1):
-                if sheet[f'A{row}'].value == current_date:
-                    # Удаляем строку
-                    sheet.delete_rows(row, 1)
-                    wb.save(self.filename)
-                    print(f"🗑️ Запись за {current_date} удалена (строка {row})")
-                    return True
-            return False
-        except Exception as e:
-            print(f"❌ Ошибка при удалении записи: {e}")
-            return False
-
     def add_entry(self, user_id: int, time_range: str, description: str, had_lunch: bool, last_name: str = ""):
         try:
             print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
             print(f"📁 Путь к файлу: {self.filename}")
-            print(f"📝 Данные: {time_range}, обед: {had_lunch}")
-
-            wb = openpyxl.load_workbook(self.filename)
+            print(f"📝 Данные: {time_range}, {description}, обед: {had_lunch}")
             sheet_name = self.get_user_sheet(user_id, last_name)
+            wb = openpyxl.load_workbook(self.filename)
             sheet = wb[sheet_name]
-
-            current_date = datetime.now().strftime("%d.%m.%Y")
+            row = sheet.max_row + 1
             work_hours = self.calculate_work_hours(time_range, had_lunch)
-
-            new_row = sheet.max_row + 1
-            sheet[f'A{new_row}'] = current_date
-            sheet[f'B{new_row}'] = time_range
-            sheet[f'C{new_row}'] = description
-            sheet[f'D{new_row}'] = work_hours
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            sheet[f'A{row}'] = current_date
+            sheet[f'B{row}'] = time_range
+            sheet[f'C{row}'] = description
+            sheet[f'D{row}'] = work_hours
             wb.save(self.filename)
-            print(f"✅ Запись добавлена: {work_hours:.2f} ч.")
+            print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
             return True
         except Exception as e:
             print(f"❌ Ошибка при записи в Excel: {e}")
@@ -189,20 +148,28 @@ class ExcelManager:
             traceback.print_exc()
             return False
 
+    def get_user_stats(self, user_id: int, last_name: str = ""):
+        try:
+            wb = openpyxl.load_workbook(self.filename)
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet = wb[sheet_name]
+            return sheet.max_row - 1
+        except Exception as e:
+            print(f"❌ Ошибка при получении статистики: {e}")
+            return 0
+
 excel_manager = ExcelManager(EXCEL_FILE)
 user_data_cache = {}
 
 def get_main_menu_keyboard():
     keyboard = [
-        ["📝 Отчет", "🗑️ Удалить запись"],
-        ["⏰ Напоминание", "📥 Скачать отчет"]
+        ["📝 Отчет", "⏰ Напоминание"],
+        ["📥 Скачать отчет"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
 
 def get_yes_no_keyboard():
     return ReplyKeyboardMarkup([["Да", "Нет"]], resize_keyboard=True, one_time_keyboard=True)
-
-# --- ОСТАЛЬНОЙ КОД ---
 
 async def send_welcome_message(update: Update, user):
     welcome_text = (
@@ -249,7 +216,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏰ Напоминание установлено на: *{reminder_time.strftime('%H:%M')}*\n"
         f"*Используй кнопки меню для управления:*\n"
         f"📝 *Отчет* - добавить запись о работе\n"
-        f"🗑️ *Удалить запись* - удалить сегодняшнюю запись\n"
         f"⏰ *Напоминание* - изменить время напоминания\n"
         f"📥 *Скачать отчет* - получить Excel файл"
     )
@@ -263,23 +229,15 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await reminder_command(update, context)
     elif text == "📥 Скачать отчет":
         return await download_file(update, context)
-    elif text == "🗑️ Удалить запись":
-        return await delete_today_entry(update, context)
     else:
         await update.message.reply_text("Неизвестная команда. Используй кнопки меню.", reply_markup=get_main_menu_keyboard())
 
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user = update.message.from_user
-    last_name = user.last_name or user.first_name or ""
-    if excel_manager.has_entry_today(user_id, last_name):
-        await update.message.reply_text(
-            "❗ Вы уже сделали запись за сегодняшний день.\n"
-            "🗑️ Удалите предыдущую и создайте новую.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
+# --- ОСТАЛЬНЫЕ ФУНКЦИИ БЕЗ ИЗМЕНЕНИЙ ---
+# (report_command, receive_time, receive_lunch_confirmation, receive_description, cancel,
+#  reminder_command, receive_reminder_time, send_test_reminder, send_daily_reminder,
+#  download_file, handle_unknown_command, restore_reminders, main)
 
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📝 *Заполним отчет о работе!*\n"
         "🕐 *ШАГ 1:* Укажи ВРЕМЯ РАБОТЫ (можно несколько периодов):\n"
@@ -374,29 +332,11 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_data_cache.pop(user_id, None)
     return ConversationHandler.END
 
-async def delete_today_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user = update.message.from_user
-    last_name = user.last_name or user.first_name or ""
-    if excel_manager.delete_entry_today(user_id, last_name):
-        await update.message.reply_text(
-            "✅ Сегодняшняя запись удалена.\n"
-            "Теперь можно создать новую через кнопку '📝 Отчет'.",
-            reply_markup=get_main_menu_keyboard()
-        )
-    else:
-        await update.message.reply_text(
-            "📭 Нет записи за сегодня.",
-            reply_markup=get_main_menu_keyboard()
-        )
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     user_data_cache.pop(user_id, None)
     await update.message.reply_text("❌ Диалог отменен.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
-
-# --- НАПОМИНАНИЯ И СКАЧИВАНИЕ (без изменений) ---
 
 async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -545,7 +485,7 @@ def restore_reminders(application: Application):
 def main():
     global global_app
     print("🚀 Запуск Work Tracker Bot...")
-    print("✅ Несколько периодов + вопрос про обед + ограничение 1 запись/день")
+    print("✅ Несколько периодов + вопрос про обед")
     application = Application.builder().token(BOT_TOKEN).build()
     global_app = application
 
@@ -567,7 +507,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("download", download_file))
-    application.add_handler(MessageHandler(filters.Regex("^(📥 Скачать отчет|📝 Отчет|⏰ Напоминание|🗑️ Удалить запись)$"), handle_menu_buttons))
+    application.add_handler(MessageHandler(filters.Regex("^(📥 Скачать отчет|📝 Отчет|⏰ Напоминание)$"), handle_menu_buttons))
     application.add_handler(report_conv_handler)
     application.add_handler(reminder_conv_handler)
     application.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
