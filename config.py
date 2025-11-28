@@ -20,9 +20,13 @@ DEFAULT_REMINDER_MINUTE = 0
 USER_SETTINGS = {}
 WELCOMED_USERS = set()
 
+# ✅ Новые константы для ограничения записей
+MAX_ENTRIES_PER_DAY = 1
+
 print("🚀 Конфигурация Work Tracker Bot:")
 print(f"✅ BOT_TOKEN: {'Установлен' if BOT_TOKEN and BOT_TOKEN != '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI' else 'ПРОВЕРЬТЕ НАСТРОЙКИ'}")
 print(f"📁 Используемая папка: {EXCEL_DIR}")
 print(f"💾 Файл данных: {EXCEL_FILE}")
 print(f"🔧 Папка существует: {os.path.exists(EXCEL_DIR)}")
 print(f"🔧 Можно писать в папку: {os.access(EXCEL_DIR, os.W_OK) if os.path.exists(EXCEL_DIR) else 'НЕТ'}")
+print(f"📊 Максимум записей в день: {MAX_ENTRIES_PER_DAY}")
