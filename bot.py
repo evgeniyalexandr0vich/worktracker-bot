@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 WAITING_TIME, WAITING_LUNCH_CONFIRMATION, WAITING_DESCRIPTION, WAITING_REMINDER_TIME = range(4)
 
 # Импорт конфигурации
-from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS
+from config import BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS, MAX_ENTRIES_PER_DAY
 
 # ✅ Глобальная ссылка на application для доступа к job_queue
 global_app = None
@@ -132,11 +132,33 @@ class ExcelManager:
             print(f"Ошибка вычисления часов: {e}")
             return 0.0
 
+    def has_today_entry(self, user_id: int, last_name: str = ""):
+        """Проверяет, есть ли уже запись за сегодня"""
+        try:
+            wb = openpyxl.load_workbook(self.filename)
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet = wb[sheet_name]
+            
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            
+            for row in range(2, sheet.max_row + 1):
+                date_cell = sheet[f'A{row}']
+                if date_cell.value == current_date:
+                    return True
+            return False
+        except Exception as e:
+            print(f"❌ Ошибка при проверке записи за сегодня: {e}")
+            return False
+
     def add_entry(self, user_id: int, time_range: str, description: str, had_lunch: bool, last_name: str = ""):
         try:
             print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
             print(f"📁 Путь к файлу: {self.filename}")
             print(f"📝 Данные: {time_range}, {description}, обед: {had_lunch}")
+
+            # Проверяем лимит записей
+            if self.has_today_entry(user_id, last_name):
+                return False, "limit_exceeded"
 
             # Гарантируем существование листа
             sheet_name = self.get_user_sheet(user_id, last_name)
@@ -153,12 +175,44 @@ class ExcelManager:
             sheet[f'D{row}'] = work_hours
             wb.save(self.filename)
             print(f"✅ Запись добавлена для пользователя {user_id}: {work_hours:.2f} ч.")
-            return True
+            return True, "success"
         except Exception as e:
             print(f"❌ Ошибка при записи в Excel: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            return False, "error"
+
+    def delete_today_entry(self, user_id: int, last_name: str = ""):
+        """Удаляет последнюю запись за сегодня"""
+        try:
+            wb = openpyxl.load_workbook(self.filename)
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet = wb[sheet_name]
+            
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            deleted_data = None
+            
+            # Ищем запись за сегодня (с конца)
+            for row in range(sheet.max_row, 1, -1):
+                date_cell = sheet[f'A{row}']
+                if date_cell.value == current_date:
+                    # Сохраняем данные удаляемой записи
+                    deleted_data = {
+                        'date': sheet[f'A{row}'].value,
+                        'time_range': sheet[f'B{row}'].value,
+                        'description': sheet[f'C{row}'].value,
+                        'work_hours': sheet[f'D{row}'].value
+                    }
+                    # Удаляем строку
+                    sheet.delete_rows(row)
+                    wb.save(self.filename)
+                    print(f"✅ Запись за сегодня удалена для пользователя {user_id}")
+                    return True, deleted_data
+            
+            return False, None  # Не найдено записей за сегодня
+        except Exception as e:
+            print(f"❌ Ошибка при удалении записи: {e}")
+            return False, None
 
     def get_user_stats(self, user_id: int, last_name: str = ""):
         try:
@@ -176,7 +230,8 @@ user_data_cache = {}
 def get_main_menu_keyboard():
     keyboard = [
         ["📝 Отчет"],
-        ["⚙️ Напоминание", "📥 Скачать отчет"]
+        ["🗑️ Удалить запись", "⚙️ Напоминание"],
+        ["📥 Скачать отчет"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
 
@@ -193,6 +248,7 @@ async def send_welcome_message(update: Update, user):
         "• Ты указываешь, в какое время работал и что делал\n"
         "• Все данные автоматически сохраняются в Excel таблицу\n"
         "• У каждого сотрудника свой лист в таблице\n"
+        "*Важно:* Можно сделать только *1 запись в день*\n"
         "*Преимущества:*\n"
         "✅ Всегда актуальная информация о работе\n"
         "✅ Удобный учет времени\n"
@@ -221,15 +277,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_name = user.last_name or user.first_name or ""
     stats = excel_manager.get_user_stats(user_id, last_name)
     reminder_time = USER_SETTINGS[user_id]['reminder_time']
+    has_today_entry = excel_manager.has_today_entry(user_id, last_name)
+    
     if is_new_user:
         message_text = f"👋 *Рад познакомиться, {user.first_name}!*\n"
     else:
         message_text = f"👋 *С возвращением, {user.first_name}!*\n"
+    
     message_text += (
         f"📊 Твоя статистика: *{stats} записей*\n"
         f"⏰ Напоминание установлено на: *{reminder_time.strftime('%H:%M')}*\n"
+    )
+    
+    if has_today_entry:
+        message_text += f"📝 *Сегодняшняя запись:* ✅ УЖЕ СДЕЛАНА\n"
+    else:
+        message_text += f"📝 *Сегодняшняя запись:* ❌ ЕЩЕ НЕТ\n"
+        
+    message_text += (
         f"*Используй кнопки меню для управления:*\n"
         f"📝 *Отчет* - добавить запись о работе\n"
+        f"🗑️ *Удалить запись* - удалить сегодняшнюю запись\n"
         f"⚙️ *Напоминание* - изменить время напоминания\n"
         f"📥 *Скачать отчет* - получить Excel файл"
     )
@@ -239,6 +307,8 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text
     if text == "📝 Отчет":
         return await report_command(update, context)
+    elif text == "🗑️ Удалить запись":
+        return await delete_entry_command(update, context)
     elif text == "⚙️ Напоминание":
         return await reminder_command(update, context)
     elif text == "📥 Скачать отчет":
@@ -247,6 +317,21 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Неизвестная команда. Используй кнопки меню.", reply_markup=get_main_menu_keyboard())
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user = update.message.from_user
+    last_name = user.last_name or user.first_name or ""
+    
+    # Проверяем, есть ли уже запись за сегодня
+    if excel_manager.has_today_entry(user_id, last_name):
+        await update.message.reply_text(
+            "❌ *Вы уже сделали запись за сегодняшний день.*\n\n"
+            "Чтобы создать новую запись, сначала удалите предыдущую через кнопку \"🗑️ Удалить запись\", "
+            "а затем создайте новую через кнопку \"📝 Отчет\".",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
     await update.message.reply_text(
         "📝 *Заполним отчет о работе!*\n"
         "🕐 *ШАГ 1:* Укажи ВРЕМЯ РАБОТЫ (можно несколько периодов):\n"
@@ -320,8 +405,17 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     had_lunch = user_data_cache[user_id]['had_lunch']
     last_name = user.last_name or user.first_name or ""
 
-    success = excel_manager.add_entry(user_id, time_range, description, had_lunch, last_name)
-    if success:
+    success, result = excel_manager.add_entry(user_id, time_range, description, had_lunch, last_name)
+    
+    if result == "limit_exceeded":
+        await update.message.reply_text(
+            "❌ *Вы уже сделали запись за сегодняшний день.*\n\n"
+            "Чтобы создать новую запись, сначала удалите предыдущую через кнопку \"🗑️ Удалить запись\", "
+            "а затем создайте новую через кнопку \"📝 Отчет\".",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+    elif success:
         stats = excel_manager.get_user_stats(user_id, last_name)
         current_date = datetime.now().strftime("%d.%m.%Y")
         work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
@@ -332,8 +426,11 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🍽️ *Обед:* {'Да' if had_lunch else 'Нет'}\n"
             f"⏱️ *Часы работы без обеда:* {work_hours:.2f} ч.\n"
             f"📝 *Описание работы:* {description}\n"
-            f"📊 *Всего записей:* {stats}\n"
-            "Можешь добавить еще запись через кнопку '📝 Отчет'",
+            f"📊 *Всего записей:* {stats}\n\n"
+            "*Теперь ты можешь:*\n"
+            "• 🗑️ *Удалить запись* - если нужно исправить\n"
+            "• 📥 *Скачать отчет* - получить полный файл\n"
+            "*Новая запись будет доступна завтра*",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
@@ -342,9 +439,36 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
             "❌ Произошла ошибка при сохранении. Попробуй еще раз",
             reply_markup=get_main_menu_keyboard()
         )
+    
     if user_id in user_data_cache:
         del user_data_cache[user_id]
     return ConversationHandler.END
+
+async def delete_entry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    user = update.message.from_user
+    last_name = user.last_name or user.first_name or ""
+    
+    success, deleted_data = excel_manager.delete_today_entry(user_id, last_name)
+    
+    if success:
+        await update.message.reply_text(
+            "🗑️ *Запись за сегодня успешно удалена!*\n\n"
+            f"📅 *Дата:* {deleted_data['date']}\n"
+            f"🕐 *Время работы:* {deleted_data['time_range']}\n"
+            f"📝 *Описание:* {deleted_data['description']}\n"
+            f"⏱️ *Часы работы:* {deleted_data['work_hours']} ч.\n\n"
+            "Теперь ты можешь создать новую запись через кнопку \"📝 Отчет\"",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            "❌ *Не найдено записей за сегодня для удаления.*\n\n"
+            "Сначала создайте запись через кнопку \"📝 Отчет\"",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -352,35 +476,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del user_data_cache[user_id]
     await update.message.reply_text("❌ Диалог отменен.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    user = update.message.from_user
-    last_name = user.last_name or user.first_name or ""
-    stats = excel_manager.get_user_stats(user_id, last_name)
-    await update.message.reply_text(
-        f"📊 *Твоя статистика:*\n"
-        f"• *Всего записей:* {stats}\n"
-        f"• *Дата последней записи:* {datetime.now().strftime('%d.%m.%Y')}\n"
-        f"Продолжай в том же духе! 💪",
-        parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard()
-    )
-
-async def my_time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id not in USER_SETTINGS:
-        USER_SETTINGS[user_id] = {
-            'reminder_time': time(hour=DEFAULT_REMINDER_HOUR, minute=DEFAULT_REMINDER_MINUTE),
-            'first_name': update.message.from_user.first_name or ""
-        }
-    reminder_time = USER_SETTINGS[user_id]['reminder_time']
-    await update.message.reply_text(
-        f"⏰ *Твое текущее время напоминания:* {reminder_time.strftime('%H:%M')}\n"
-        f"Чтобы изменить время, нажми кнопку '⚙️ Напоминание'",
-        parse_mode='Markdown',
-        reply_markup=get_main_menu_keyboard()
-    )
 
 async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -471,37 +566,39 @@ async def send_daily_reminder(context):
         reminder_time_str = "18:00"
         if user_id in USER_SETTINGS and 'reminder_time' in USER_SETTINGS[user_id]:
             reminder_time_str = USER_SETTINGS[user_id]['reminder_time'].strftime('%H:%M')
+        
+        user = USER_SETTINGS.get(user_id, {})
+        last_name = user.get('last_name', '') or user.get('first_name', '')
+        has_today_entry = excel_manager.has_today_entry(user_id, last_name)
+        
+        if has_today_entry:
+            message_text = (
+                f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
+                f"Привет! Я вижу, что ты уже заполнил отчет за сегодня. ✅\n\n"
+                f"Если нужно что-то исправить:\n"
+                f"1️⃣ Нажми '🗑️ Удалить запись'\n"
+                f"2️⃣ Затем создай новую через '📝 Отчет'"
+            )
+        else:
+            message_text = (
+                f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
+                f"Привет! Пора заполнить отчет о работе за сегодня.\n"
+                f"Нажми кнопку '📝 Отчет' чтобы указать:\n"
+                f"1️⃣ В какое время ты работал (можно несколько периодов)\n"
+                f"2️⃣ Был ли обед\n"
+                f"3️⃣ Что ты делал\n"
+                f"Это займет всего 30 секунд! ⏱️"
+            )
+            
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
-                 f"Привет! Пора заполнить отчет о работе за сегодня.\n"
-                 f"Нажми кнопку '📝 Отчет' чтобы указать:\n"
-                 f"1️⃣ В какое время ты работал (можно несколько периодов)\n"
-                 f"2️⃣ Был ли обед\n"
-                 f"3️⃣ Что ты делал\n"
-                 f"Это займет всего 30 секунд! ⏱️",
+            text=message_text,
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
         print(f"✅ Ежедневное напоминание отправлено пользователю {user_id}")
     except Exception as e:
         print(f"❌ Ошибка при отправке напоминания пользователю {user_id}: {e}")
-
-async def manual_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    original_job = getattr(context, 'job', None)
-    class MockJob:
-        def __init__(self, data):
-            self.data = data
-    context.job = MockJob(user_id)
-    try:
-        await send_daily_reminder(context)
-    finally:
-        context.job = original_job
-    await update.message.reply_text(
-        "✅ Тестовое напоминание отправлено! Проверь свой чат с ботом.",
-        reply_markup=get_main_menu_keyboard()
-    )
 
 async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -517,7 +614,8 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 filename=f"work_reports_{datetime.now().strftime('%d.%m.%Y')}.xlsx",
                 caption="📊 *Вот твой файл с отчетами!*\n"
                        "Файл содержит все записи о рабочем времени.\n"
-                       "Каждый пользователь имеет свой лист в файле.",
+                       "Каждый пользователь имеет свой лист в файле.\n"
+                       "*Ограничение:* 1 запись в день на пользователя",
                 parse_mode='Markdown',
                 reply_markup=get_main_menu_keyboard()
             )
@@ -534,6 +632,7 @@ async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_T
         "❌ *Неизвестная команда.*\n"
         "*Используй кнопки меню:*\n"
         "📝 Отчет - добавить запись о работе\n"
+        "🗑️ Удалить запись - удалить сегодняшнюю запись\n"
         "⚙️ Напоминание - изменить время напоминания\n"
         "📥 Скачать отчет - получить Excel файл",
         parse_mode='Markdown',
@@ -569,6 +668,7 @@ def main():
     print("📊 Бот для учета рабочего времени")
     print("💾 Excel файл:", EXCEL_FILE)
     print("⏱️ Поддержка нескольких периодов + выбор обеда")
+    print("📝 Ограничение: 1 запись в день на пользователя")
 
     application = Application.builder().token(BOT_TOKEN).build()
     global_app = application
@@ -599,6 +699,8 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("download", download_file))
+    application.add_handler(CommandHandler("delete", delete_entry_command))
+    application.add_handler(MessageHandler(filters.Regex("^(🗑️ Удалить запись)$"), delete_entry_command))
     application.add_handler(MessageHandler(filters.Regex("^(📥 Скачать отчет)$"), download_file))
     application.add_handler(report_conv_handler)
     application.add_handler(reminder_conv_handler)
