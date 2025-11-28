@@ -1,8 +1,6 @@
 import os
 from datetime import time
-
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI')
-
 # ✅ Автоматическое определение пути для Railway
 if os.path.exists('/app'):
     # Production на Railway
@@ -10,16 +8,13 @@ if os.path.exists('/app'):
 else:
     # Локальная разработка
     EXCEL_DIR = "./excel_data"
-
 # Создаем папку
 os.makedirs(EXCEL_DIR, exist_ok=True)
 EXCEL_FILE = os.path.join(EXCEL_DIR, "work_tracker.xlsx")
-
 DEFAULT_REMINDER_HOUR = 18
 DEFAULT_REMINDER_MINUTE = 0
 USER_SETTINGS = {}
 WELCOMED_USERS = set()
-
 print("🚀 Конфигурация Work Tracker Bot:")
 print(f"✅ BOT_TOKEN: {'Установлен' if BOT_TOKEN and BOT_TOKEN != '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI' else 'ПРОВЕРЬТЕ НАСТРОЙКИ'}")
 print(f"📁 Используемая папка: {EXCEL_DIR}")
