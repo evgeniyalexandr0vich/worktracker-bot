@@ -26,7 +26,9 @@ MAX_ENTRIES_PER_DAY = 1
 # ✅ Настройки Яндекс.Диск
 YANDEX_DISK_ENABLED = True  # Включить/выключить сохранение на Яндекс.Диск
 YANDEX_DISK_TOKEN = os.getenv('YANDEX_DISK_TOKEN', '')  # OAuth-токен Яндекс.Диск
-YANDEX_DISK_FOLDER = "/WorkTrackerBot"  # Папка на Яндекс.Диске
+
+# ✅ Укажите путь к СУЩЕСТВУЮЩЕЙ папке на Яндекс.Диске
+YANDEX_DISK_FOLDER = "/PolitechCNC/Планирование и загрузка /Планирование"
 
 print("🚀 Конфигурация Work Tracker Bot:")
 print(f"✅ BOT_TOKEN: {'Установлен' if BOT_TOKEN and BOT_TOKEN != '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI' else 'ПРОВЕРЬТЕ НАСТРОЙКИ'}")
@@ -36,3 +38,5 @@ print(f"🔧 Папка существует: {os.path.exists(EXCEL_DIR)}")
 print(f"🔧 Можно писать в папку: {os.access(EXCEL_DIR, os.W_OK) if os.path.exists(EXCEL_DIR) else 'НЕТ'}")
 print(f"📊 Максимум записей в день: {MAX_ENTRIES_PER_DAY}")
 print(f"☁️  Яндекс.Диск: {'ВКЛЮЧЕН' if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN else 'ВЫКЛЮЧЕН'}")
+if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN:
+    print(f"📂 Папка на Яндекс.Диске: {YANDEX_DISK_FOLDER}")
