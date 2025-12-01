@@ -47,28 +47,31 @@ class YandexDiskManager:
             "Content-Type": "application/json"
         }
 
-    def create_folder(self, folder_path: str):
-        """Создает папку на Яндекс.Диске"""
+    def check_folder_exists(self, folder_path: str):
+        """Проверяет существование папки на Яндекс.Диске"""
         try:
             url = f"{self.base_url}?path={folder_path}"
-            response = requests.put(url, headers=self.headers)
-            if response.status_code in [200, 201, 409]:  # 409 - уже существует
-                print(f"✅ Папка на Яндекс.Диске создана или уже существует: {folder_path}")
+            response = requests.get(url, headers=self.headers)
+            if response.status_code == 200:
+                print(f"✅ Папка существует на Яндекс.Диске: {folder_path}")
                 return True
             else:
-                print(f"❌ Ошибка создания папки: {response.status_code} - {response.text}")
+                print(f"❌ Папка не найдена на Яндекс.Диске: {folder_path}")
+                print(f"Код ошибки: {response.status_code}")
+                print(f"Ответ: {response.text}")
                 return False
         except Exception as e:
-            print(f"❌ Ошибка при создании папки: {e}")
+            print(f"❌ Ошибка проверки папки: {e}")
             return False
 
     def upload_file(self, local_file_path: str, remote_file_path: str):
-        """Загружает файл на Яндекс.Диск"""
+        """Загружает файл на Яндекс.Диск в существующую папку"""
         try:
-            # Сначала создаем папку, если её нет
+            # Проверяем существование папки
             folder_path = os.path.dirname(remote_file_path)
-            if not self.create_folder(folder_path):
-                print(f"❌ Не удалось создать папку: {folder_path}")
+            if not self.check_folder_exists(folder_path):
+                print(f"❌ Папка {folder_path} не существует на Яндекс.Диске")
+                print(f"📝 Создайте папку {folder_path} вручную через Яндекс.Диск")
                 return False
 
             # Получаем URL для загрузки
@@ -109,16 +112,6 @@ class YandexDiskManager:
             print(f"❌ Ошибка получения информации о файле: {e}")
             return None
 
-    def check_folder_exists(self, folder_path: str):
-        """Проверяет существование папки на Яндекс.Диске"""
-        try:
-            url = f"{self.base_url}?path={folder_path}"
-            response = requests.get(url, headers=self.headers)
-            return response.status_code == 200
-        except Exception as e:
-            print(f"❌ Ошибка проверки папки: {e}")
-            return False
-
 # ✅ Инициализация менеджера Яндекс.Диска
 yandex_disk = YandexDiskManager(YANDEX_DISK_TOKEN) if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN else None
 
@@ -128,21 +121,17 @@ class ExcelManager:
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """Создаёт файл, если не существует. НЕ удаляем активный лист."""
+        """Создаёт файл, если не существует."""
         try:
             directory = os.path.dirname(self.filename)
             if directory and not os.path.exists(directory):
                 os.makedirs(directory, exist_ok=True)
-                print(f"✅ Создана папка: {directory}")
+                print(f"✅ Создана локальная папка: {directory}")
 
             if not os.path.exists(self.filename):
                 wb = Workbook()
                 wb.save(self.filename)
                 print(f"✅ Создан новый Excel файл: {self.filename}")
-                # Создаем папку на Яндекс.Диске при первом запуске
-                if yandex_disk:
-                    if yandex_disk.create_folder(YANDEX_DISK_FOLDER):
-                        print(f"✅ Папка на Яндекс.Диске создана: {YANDEX_DISK_FOLDER}")
             else:
                 print(f"📁 Excel файл уже существует: {self.filename}")
 
@@ -337,6 +326,8 @@ def get_yes_no_keyboard():
 
 async def send_welcome_message(update: Update, user):
     yandex_status = "✅ ВКЛЮЧЕН" if yandex_disk else "❌ ВЫКЛЮЧЕН"
+    yandex_folder_info = f"\n📂 *Папка:* {YANDEX_DISK_FOLDER}" if yandex_disk else ""
+    
     welcome_text = (
         "🎉 *ДОБРО ПОЖАЛОВАТЬ!* 🎉\n"
         "🤖 *Я - Work Tracker Bot* 🤖\n"
@@ -346,7 +337,7 @@ async def send_welcome_message(update: Update, user):
         "• Ты указываешь, в какое время работал и что делал\n"
         "• Все данные автоматически сохраняются в Excel таблицу\n"
         "• У каждого сотрудника свой лист в таблице\n"
-        f"• ☁️ *Резервное копирование:* {yandex_status}\n"
+        f"• ☁️ *Резервное копирование:* {yandex_status}{yandex_folder_info}\n"
         "*Важно:* Можно сделать только *1 запись в день*\n"
         "*Преимущества:*\n"
         "✅ Всегда актуальная информация о работе\n"
@@ -395,7 +386,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_text += f"📝 *Сегодняшняя запись:* ❌ ЕЩЕ НЕТ\n"
         
     yandex_status = "✅ ВКЛЮЧЕНО" if yandex_disk else "❌ ВЫКЛЮЧЕНО"
-    message_text += f"☁️ *Резервное копирование:* {yandex_status}\n\n"
+    message_text += f"☁️ *Резервное копирование:* {yandex_status}"
+    
+    if yandex_disk:
+        message_text += f"\n📂 *Папка на Яндекс.Диске:* {YANDEX_DISK_FOLDER}"
+    
+    message_text += "\n\n"
         
     message_text += (
         f"*Используй кнопки меню для управления:*\n"
@@ -603,17 +599,19 @@ async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     await update.message.reply_text(
-        "☁️ *Начинаю синхронизацию с Яндекс.Диском...*",
+        "☁️ *Проверяю подключение к Яндекс.Диску...*",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove()
     )
     
     try:
-        # Сначала создаем папку
-        if not yandex_disk.create_folder(YANDEX_DISK_FOLDER):
+        # Проверяем существование папки
+        if not yandex_disk.check_folder_exists(YANDEX_DISK_FOLDER):
             await update.message.reply_text(
-                "❌ *Не удалось создать папку на Яндекс.Диске!*\n\n"
-                "Проверьте настройки доступа.",
+                f"❌ *Папка не найдена на Яндекс.Диске!*\n\n"
+                f"Создайте папку вручную:\n"
+                f"`{YANDEX_DISK_FOLDER}`\n\n"
+                f"После создания попробуйте снова.",
                 parse_mode='Markdown',
                 reply_markup=get_main_menu_keyboard()
             )
@@ -631,7 +629,7 @@ async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"📊 *Данные файла на Яндекс.Диске:*\n"
                     f"• 📁 Размер: {int(file_size) / 1024 / 1024:.2f} MB\n"
                     f"• 📅 Обновлен: {modified[:19] if modified else 'Неизвестно'}\n"
-                    f"• 🔗 Путь: {YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx\n\n"
+                    f"• 🔗 Путь: {remote_file_path}\n\n"
                     f"Все данные надежно сохранены в облаке! ☁️",
                     parse_mode='Markdown',
                     reply_markup=get_main_menu_keyboard()
@@ -639,7 +637,9 @@ async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE
             else:
                 await update.message.reply_text(
                     "✅ *Файл загружен на Яндекс.Диск!*\n\n"
-                    "Резервная копия успешно сохранена в облаке. ☁️",
+                    f"Резервная копия успешно сохранена в папке:\n"
+                    f"`{remote_file_path}`\n\n"
+                    "Все данные надежно сохранены в облаке! ☁️",
                     parse_mode='Markdown',
                     reply_markup=get_main_menu_keyboard()
                 )
@@ -647,7 +647,10 @@ async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(
                 "❌ *Ошибка синхронизации!*\n\n"
                 "Не удалось загрузить файл на Яндекс.Диск. "
-                "Проверьте настройки и попробуйте позже.",
+                "Проверьте:\n"
+                "1. Существует ли папка на Яндекс.Диске\n"
+                "2. Правильность OAuth-токена\n"
+                "3. Достаточно ли места на диске",
                 parse_mode='Markdown',
                 reply_markup=get_main_menu_keyboard()
             )
@@ -869,12 +872,13 @@ def main():
     print("📝 Ограничение: 1 запись в день на пользователя")
     print(f"☁️  Яндекс.Диск: {'ВКЛЮЧЕН' if yandex_disk else 'ВЫКЛЮЧЕН'}")
     
-    # Создаем папку на Яндекс.Диске при запуске
     if yandex_disk:
-        if yandex_disk.create_folder(YANDEX_DISK_FOLDER):
-            print(f"✅ Папка на Яндекс.Диске создана: {YANDEX_DISK_FOLDER}")
+        print(f"📂 Папка на Яндекс.Диске: {YANDEX_DISK_FOLDER}")
+        # Проверяем существование папки при запуске
+        if yandex_disk.check_folder_exists(YANDEX_DISK_FOLDER):
+            print(f"✅ Папка существует на Яндекс.Диске")
         else:
-            print(f"❌ Не удалось создать папку на Яндекс.Диске: {YANDEX_DISK_FOLDER}")
+            print(f"⚠️  Папка не найдена. Создайте папку вручную: {YANDEX_DISK_FOLDER}")
 
     application = Application.builder().token(BOT_TOKEN).build()
     global_app = application
