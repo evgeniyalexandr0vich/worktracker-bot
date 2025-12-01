@@ -13,7 +13,7 @@ else:
 
 # Создаем папку
 os.makedirs(EXCEL_DIR, exist_ok=True)
-EXCEL_FILE = os.path.join(EXCEL_DIR, "Учет рабочего времени.xlsx")
+EXCEL_FILE = os.path.join(EXCEL_DIR, "Учет_рабочего_времени.xlsx")
 
 DEFAULT_REMINDER_HOUR = 18
 DEFAULT_REMINDER_MINUTE = 0
