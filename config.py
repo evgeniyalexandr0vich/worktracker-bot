@@ -20,7 +20,6 @@ DEFAULT_REMINDER_HOUR = 18
 DEFAULT_REMINDER_MINUTE = 0
 USER_SETTINGS: Dict[int, Dict[str, Any]] = {}
 WELCOMED_USERS = set()
-USER_EDIT_STATE: Dict[int, Dict[str, Any]] = {}  # Хранение состояния редактирования
 
 # ✅ Новые константы для ограничения записей
 MAX_ENTRIES_PER_DAY = 1
@@ -31,17 +30,6 @@ YANDEX_DISK_TOKEN = os.getenv('YANDEX_DISK_TOKEN', '')  # OAuth-токен Ян�
 
 # ✅ Укажите путь к СУЩЕСТВУЮЩЕЙ папке на Яндекс.Диске
 YANDEX_DISK_FOLDER = "/PolitechCNC/Планирование и загрузка /Планирование"
-
-# ✅ Константы для дней недели
-WEEKDAYS_RU = {
-    0: "Понедельник",
-    1: "Вторник",
-    2: "Среда",
-    3: "Четверг",
-    4: "Пятница",
-    5: "Суббота",
-    6: "Воскресенье"
-}
 
 print("🚀 Конфигурация Work Tracker Bot:")
 print(f"✅ BOT_TOKEN: {'Установлен' if BOT_TOKEN and BOT_TOKEN != '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI' else 'ПРОВЕРЬТЕ НАСТРОЙКИ'}")
