@@ -41,6 +41,7 @@ print(f"🔧 Папка существует: {os.path.exists(EXCEL_DIR)}")
 print(f"🔧 Можно писать в папку: {os.access(EXCEL_DIR, os.W_OK) if os.path.exists(EXCEL_DIR) else 'НЕТ'}")
 print(f"📊 Максимум записей в день: {MAX_ENTRIES_PER_DAY}")
 print(f"📅 История пропущенных дней: {MISSED_DAYS_HISTORY} дней")
+print(f"📆 Календарная таблица: ВКЛЮЧЕНА")
 print(f"☁️  Яндекс.Диск: {'ВКЛЮЧЕН' if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN else 'ВЫКЛЮЧЕН'}")
 if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN:
     print(f"📂 Папка на Яндекс.Диске: {YANDEX_DISK_FOLDER}")
