@@ -287,18 +287,47 @@ class ExcelManager:
             if not existing_dates:
                 # Если нет записей, начинаем с сегодняшнего дня
                 start_date = datetime.now().date()
+                # Создаем записи за последние 7 дней
+                date_range = []
+                for i in range(7):
+                    date = start_date - timedelta(days=i)
+                    date_range.append(date)
+                
+                date_range.sort()  # Сортируем от старых к новым
+                
+                created_count = 0
+                for date in date_range:
+                    row = sheet.max_row + 1
+                    sheet[f'A{row}'] = date.strftime("%d.%m.%Y")
+                    sheet[f'B{row}'] = WEEKDAYS_RU[date.weekday()]
+                    sheet[f'C{row}'] = "ПРОПУЩЕНО"
+                    sheet[f'D{row}'] = "День пропущен"
+                    sheet[f'E{row}'] = 0
+                    sheet[f'F{row}'] = "ПРОПУЩЕН"
+                    
+                    # Форматирование для пропущенных дней
+                    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+                        sheet[f'{col}{row}'].fill = red_fill
+                    
+                    created_count += 1
+                
+                if created_count > 0:
+                    print(f"✅ Создано {created_count} записей-заглушек для новых пользователей")
+                
+                wb.save(self.filename)
+                return created_count
             else:
                 # Находим самую раннюю и самую позднюю дату
                 min_date = min(existing_dates)
                 max_date = max(existing_dates)
                 
                 # Добавляем все даты от min_date до сегодня
-                start_date = min_date
                 today = datetime.now().date()
                 
-                # Создаем диапазон дат от start_date до today
+                # Создаем диапазон дат от min_date до today
                 date_range = []
-                current_date = start_date
+                current_date = min_date
                 while current_date <= today:
                     date_range.append(current_date)
                     current_date += timedelta(days=1)
@@ -568,7 +597,7 @@ def get_date_selection_keyboard(records):
     keyboard.append([InlineKeyboardButton(f"📅 Сегодня ({today_str})", callback_data=f"select_date_{today_str}")])
     
     # Добавляем кнопку "Назад"
-    keyboard.append([InlineKeyboardButton("« Назад", callback_data="back_to_menu")])
+    keyboard.append([InlineKeyboardButton("« Назад в меню", callback_data="back_to_menu")])
     
     return InlineKeyboardMarkup(keyboard)
 
@@ -767,7 +796,6 @@ async def date_selection_callback(update: Update, context: ContextTypes.DEFAULT_
                 f"📅 *РЕДАКТИРОВАНИЕ ЗАПИСИ ЗА {selected_date}*\n\n"
                 f"*Текущие данные:*\n"
                 f"🕐 *Время работы:* {existing_record['time_range']}\n"
-                f"🍽️ *Обед:* {'Да' if existing_record.get('had_lunch', False) else 'Нет'}\n"
                 f"📝 *Описание:* {existing_record['description']}\n"
                 f"⏱️ *Часы работы:* {existing_record['work_hours']} ч.\n\n"
                 "Что вы хотите сделать?",
@@ -1124,11 +1152,161 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
 
-# Остальные функции (reminder_command, download_file, sync_to_yandex_disk и т.д.)
-# остаются такими же, как в оригинальном коде, но с небольшими улучшениями
+# ========== ФУНКЦИИ ДЛЯ НАПОМИНАНИЙ ==========
+
+async def receive_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение нового времени напоминания"""
+    user_id = update.message.from_user.id
+    user_input = update.message.text.strip()
+    
+    # Проверяем формат времени
+    time_pattern = r'^([0-1]?[0-9]|2[0-3]):([0-5][0-9])$'
+    if not re.match(time_pattern, user_input):
+        await update.message.reply_text(
+            "❌ *Неверный формат времени!*\n"
+            "Пожалуйста, введи время в формате *ЧАСЫ:МИНУТЫ* (24-часовой формат):\n"
+            "• 18:00\n• 09:30\n• 17:45\nПопробуй еще раз:",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    hours, minutes = map(int, user_input.split(':'))
+    
+    if user_id not in USER_SETTINGS:
+        USER_SETTINGS[user_id] = {}
+    
+    reminder_time = time(hour=hours, minute=minutes)
+    USER_SETTINGS[user_id]['reminder_time'] = reminder_time
+    USER_SETTINGS[user_id]['first_name'] = update.message.from_user.first_name or ""
+    USER_SETTINGS[user_id]['last_name'] = update.message.from_user.last_name or ""
+
+    global global_app
+    job_queue = global_app.job_queue
+    if job_queue:
+        for job in job_queue.get_jobs_by_name(str(user_id)):
+            job.schedule_removal()
+        
+        job_time = time(hour=hours, minute=minutes, tzinfo=TIMEZONE)
+        job_queue.run_daily(
+            send_daily_reminder,
+            time=job_time,
+            days=tuple(range(7)),
+            data=user_id,
+            name=str(user_id)
+        )
+        
+        job_queue.run_once(
+            send_test_reminder,
+            when=60,
+            data=user_id,
+            name=f"test_{user_id}"
+        )
+        
+        print(f"✅ Напоминание установлено для {user_id} на {hours:02d}:{minutes:02d}")
+    else:
+        print("❌ job_queue недоступен — критическая ошибка!")
+
+    await update.message.reply_text(
+        f"✅ *Отлично! Твое время напоминания установлено на {user_input}*\n"
+        f"Каждый день в это время я буду присылать тебе напоминание заполнить отчет о работе.\n"
+        f"*Тестовое напоминание придет через 1 минуту* ⏰\n"
+        f"Ты всегда можешь изменить время через кнопку '⚙️ Напоминание'",
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
+    return ConversationHandler.END
+
+async def send_test_reminder(context):
+    """Отправка тестового напоминания"""
+    try:
+        user_id = context.job.data
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🧪 *ТЕСТОВОЕ НАПОМИНАНИЕ!*\n"
+                 "Это тестовое сообщение чтобы проверить работу напоминаний.\n"
+                 "Если ты видишь это сообщение - значит система напоминаний работает правильно! ✅",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        print(f"✅ Тестовое напоминание отправлено пользователю {user_id}")
+    except Exception as e:
+        print(f"❌ Ошибка при отправке тестового напоминания: {e}")
+
+async def send_daily_reminder(context):
+    """Отправка ежедневного напоминания"""
+    try:
+        user_id = context.job.data
+        reminder_time_str = "18:00"
+        if user_id in USER_SETTINGS and 'reminder_time' in USER_SETTINGS[user_id]:
+            reminder_time_str = USER_SETTINGS[user_id]['reminder_time'].strftime('%H:%M')
+        
+        user = USER_SETTINGS.get(user_id, {})
+        last_name = user.get('last_name', '') or user.get('first_name', '')
+        has_today_entry = excel_manager.has_today_entry(user_id, last_name)
+        
+        if has_today_entry:
+            message_text = (
+                f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
+                f"Привет! Я вижу, что ты уже заполнил отчет за сегодня. ✅\n\n"
+                f"Если нужно что-то исправить:\n"
+                f"1️⃣ Нажми '✏️ Редактировать'\n"
+                f"2️⃣ Выбери сегодняшнюю дату\n"
+                f"3️⃣ Исправь данные"
+            )
+        else:
+            message_text = (
+                f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
+                f"Привет! Пора заполнить отчет о работе за сегодня.\n\n"
+                f"Нажми кнопку '📝 Отчет' чтобы быстро добавить запись за сегодня.\n\n"
+                f"Или используй '✏️ Редактировать' чтобы:\n"
+                f"• Заполнить пропущенные дни\n"
+                f"• Отредактировать старые записи"
+            )
+            
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message_text,
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        print(f"✅ Ежедневное напоминание отправлено пользователю {user_id}")
+    except Exception as e:
+        print(f"❌ Ошибка при отправке напоминания пользователю {user_id}: {e}")
+
+def restore_reminders(application: Application):
+    """Восстановление напоминаний при перезапуске бота"""
+    job_queue = application.job_queue
+    restored_count = 0
+    
+    for user_id, settings in USER_SETTINGS.items():
+        if 'reminder_time' in settings:
+            for job in job_queue.get_jobs_by_name(str(user_id)):
+                job.schedule_removal()
+            
+            job_time = time(
+                hour=settings['reminder_time'].hour,
+                minute=settings['reminder_time'].minute,
+                tzinfo=TIMEZONE
+            )
+            
+            job_queue.run_daily(
+                send_daily_reminder,
+                time=job_time,
+                days=tuple(range(7)),
+                data=user_id,
+                name=str(user_id)
+            )
+            
+            restored_count += 1
+            print(f"🔁 Восстановлено напоминание для {user_id} на {settings['reminder_time'].strftime('%H:%M')}")
+    
+    print(f"✅ Восстановлено {restored_count} напоминаний.")
+
+# ========== ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 
 async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Установка времени напоминания (улучшенная версия)"""
+    """Установка времени напоминания"""
     user_id = update.message.from_user.id
     
     # Получаем текущее время напоминания
@@ -1152,7 +1330,7 @@ async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAITING_REMINDER_TIME
 
 async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Скачивание файла (улучшенная версия)"""
+    """Скачивание файла"""
     try:
         if not os.path.exists(EXCEL_FILE):
             await update.message.reply_text(
@@ -1201,7 +1379,7 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принудительная синхронизация с Яндекс.Диском (улучшенная версия)"""
+    """Принудительная синхронизация с Яндекс.Диском"""
     if not yandex_disk:
         await update.message.reply_text(
             "❌ *Синхронизация с Яндекс.Диском отключена.*\n\n"
@@ -1320,8 +1498,21 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# Функции send_test_reminder, send_daily_reminder, restore_reminders
-# остаются такими же, как в оригинальном коде
+async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка неизвестных команд"""
+    await update.message.reply_text(
+        "❌ *Неизвестная команда.*\n"
+        "*Используй кнопки меню:*\n"
+        "📝 Отчет - добавить запись о работе\n"
+        "✏️ Редактировать - заполнить/изменить любой день\n"
+        "🗑️ Удалить запись - удалить сегодняшнюю запись\n"
+        "📊 Статистика - подробная статистика\n"
+        "⚙️ Напоминание - изменить время напоминания\n"
+        "📥 Скачать отчет - получить Excel файл\n"
+        "☁️ Синхронизировать - принудительно сохранить на Яндекс.Диск",
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
 
 def main():
     global global_app
@@ -1353,7 +1544,8 @@ def main():
             WAITING_EDIT_LUNCH: [MessageHandler(filters.Regex("^(Да|Нет)$"), receive_edit_lunch)],
             WAITING_EDIT_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_description)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False  # Это устраняет предупреждение
     )
 
     # Редактирование/заполнение любых записей
@@ -1369,9 +1561,7 @@ def main():
             WAITING_EDIT_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_description)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        map_to_parent={
-            ConversationHandler.END: ConversationHandler.END
-        }
+        per_message=False  # Это устраняет предупреждение
     )
 
     # Напоминания
@@ -1383,7 +1573,8 @@ def main():
         states={
             WAITING_REMINDER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_reminder_time)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=False  # Это устраняет предупреждение
     )
 
     # Основные обработчики
