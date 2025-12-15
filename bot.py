@@ -3,9 +3,7 @@ import pytz
 import logging
 import asyncio
 import requests
-import calendar
 from datetime import datetime, time, timedelta
-from typing import Optional, Dict, Any
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
@@ -13,7 +11,6 @@ from telegram.ext import (
 )
 import openpyxl
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import re
 
 # ✅ Устанавливаем часовой пояс
@@ -34,10 +31,14 @@ logger = logging.getLogger(__name__)
 
 # Константы для состояний разговора
 (
-    WAITING_TIME, WAITING_LUNCH_CONFIRMATION, 
-    WAITING_DESCRIPTION, WAITING_REMINDER_TIME,
-    WAITING_EDIT_DATE, WAITING_EDIT_TIME,
-    WAITING_EDIT_LUNCH, WAITING_EDIT_DESCRIPTION
+    WAITING_TIME, 
+    WAITING_LUNCH_CONFIRMATION, 
+    WAITING_DESCRIPTION, 
+    WAITING_REMINDER_TIME,
+    WAITING_MISSED_DATE,  # ✅ Новое состояние для выбора даты
+    WAITING_MISSED_TIME,   # ✅ Новое состояние для времени пропущенного дня
+    WAITING_MISSED_LUNCH,  # ✅ Новое состояние для обеда пропущенного дня
+    WAITING_MISSED_DESCRIPTION  # ✅ Новое состояние для описания пропущенного дня
 ) = range(8)
 
 # Импорт конфигурации
@@ -45,7 +46,8 @@ from config import (
     BOT_TOKEN, EXCEL_FILE, DEFAULT_REMINDER_HOUR, 
     DEFAULT_REMINDER_MINUTE, USER_SETTINGS, WELCOMED_USERS, 
     MAX_ENTRIES_PER_DAY, YANDEX_DISK_ENABLED, 
-    YANDEX_DISK_TOKEN, YANDEX_DISK_FOLDER
+    YANDEX_DISK_TOKEN, YANDEX_DISK_FOLDER, 
+    MISSED_DAYS_HISTORY
 )
 
 # ✅ Глобальная ссылка на application для доступа к job_queue
@@ -132,7 +134,7 @@ class ExcelManager:
     def __init__(self, filename: str):
         self.filename = filename
         self._ensure_file_exists()
-        
+
     def _ensure_file_exists(self):
         """Создаёт файл, если не существует."""
         try:
@@ -143,10 +145,6 @@ class ExcelManager:
 
             if not os.path.exists(self.filename):
                 wb = Workbook()
-                # Удаляем стандартный лист
-                if "Sheet" in wb.sheetnames:
-                    std_sheet = wb["Sheet"]
-                    wb.remove(std_sheet)
                 wb.save(self.filename)
                 print(f"✅ Создан новый Excel файл: {self.filename}")
             else:
@@ -178,47 +176,20 @@ class ExcelManager:
 
         if sheet_name not in wb.sheetnames:
             sheet = wb.create_sheet(sheet_name)
-            # Основные колонки
             sheet['A1'] = "Дата"
-            sheet['B1'] = "День недели"
-            sheet['C1'] = "Время работы"
-            sheet['D1'] = "Описание работы"
-            sheet['E1'] = "Часы работы без обеда"
-            sheet['F1'] = "Статус"
-            sheet['G1'] = "Месяц"
-            sheet['H1'] = "Год"
-            
-            # Форматирование заголовков
-            header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-            white_font = Font(color="FFFFFF", bold=True)
-            center_alignment = Alignment(horizontal="center", vertical="center")
-            
-            for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
-                cell = sheet[f'{col}1']
-                cell.font = white_font
-                cell.fill = header_fill
-                cell.alignment = center_alignment
-                
-                # Устанавливаем ширину колонок
-                if col == 'A':
-                    sheet.column_dimensions['A'].width = 12
-                elif col == 'B':
-                    sheet.column_dimensions['B'].width = 15
-                elif col == 'C':
-                    sheet.column_dimensions['C'].width = 25
-                elif col == 'D':
-                    sheet.column_dimensions['D'].width = 50
-                elif col == 'E':
-                    sheet.column_dimensions['E'].width = 20
-                elif col == 'F':
-                    sheet.column_dimensions['F'].width = 15
-                elif col == 'G':
-                    sheet.column_dimensions['G'].width = 10
-                elif col == 'H':
-                    sheet.column_dimensions['H'].width = 8
-            
+            sheet['B1'] = "Время работы"
+            sheet['C1'] = "Описание работы"
+            sheet['D1'] = "Часы работы без обеда"
+            sheet['E1'] = "Статус"  # ✅ Новая колонка для статуса записи
+            sheet.column_dimensions['A'].width = 12
+            sheet.column_dimensions['B'].width = 15
+            sheet.column_dimensions['C'].width = 50
+            sheet.column_dimensions['D'].width = 20
+            sheet.column_dimensions['E'].width = 15
+            bold_font = openpyxl.styles.Font(bold=True)
+            for cell in ['A1', 'B1', 'C1', 'D1', 'E1']:
+                sheet[cell].font = bold_font
             print(f"✅ Создан новый лист: {sheet_name}")
-        
         wb.save(self.filename)
         return sheet_name
 
@@ -264,195 +235,72 @@ class ExcelManager:
             for row in range(2, sheet.max_row + 1):
                 date_cell = sheet[f'A{row}']
                 if date_cell.value == current_date:
-                    return True
+                    status_cell = sheet[f'E{row}']
+                    # Проверяем, что это не пропущенный день (пустая запись)
+                    if status_cell.value != "ПРОПУЩЕНО":
+                        return True
             return False
         except Exception as e:
             print(f"❌ Ошибка при проверке записи за сегодня: {e}")
             return False
 
-    def create_missing_dates(self, user_id: int, last_name: str = ""):
-        """Создает пустые строки для пропущенных дней"""
+    def add_entry(self, user_id: int, time_range: str, description: str, had_lunch: bool, last_name: str = "", 
+                  target_date: str = None, is_missed_day: bool = False):
+        """
+        Добавляет запись в таблицу
+        target_date: Дата в формате dd.mm.yyyy (если None - текущая дата)
+        is_missed_day: True если это заполнение пропущенного дня
+        """
         try:
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            
-            # Получаем все существующие даты
-            existing_dates = []
-            for row in range(2, sheet.max_row + 1):
-                date_cell = sheet[f'A{row}']
-                if date_cell.value:
-                    try:
-                        date_obj = datetime.strptime(str(date_cell.value), "%d.%m.%Y")
-                        existing_dates.append(date_obj.date())
-                    except:
-                        continue
-            
-            if not existing_dates:
-                # Если нет записей, начинаем с начала месяца
-                today = datetime.now().date()
-                start_date = today.replace(day=1)
+            print(f"🔧 Попытка сохранить запись для user_id: {user_id}")
+            print(f"📁 Путь к файлу: {self.filename}")
+            print(f"📝 Данные: {time_range}, {description}, обед: {had_lunch}")
+            print(f"📅 Целевая дата: {target_date}, is_missed_day: {is_missed_day}")
+
+            # Определяем дату для записи
+            if target_date:
+                entry_date = target_date
             else:
-                # Находим самую раннюю дату
-                start_date = min(existing_dates)
-                # Если самая ранняя дата не первое число, начинаем с первого числа месяца
-                start_date = start_date.replace(day=1)
-            
-            today = datetime.now().date()
-            
-            # Создаем диапазон дат от start_date до today
-            date_range = []
-            current_date = start_date
-            while current_date <= today:
-                date_range.append(current_date)
-                current_date += timedelta(days=1)
-            
-            # Находим пропущенные даты
-            missing_dates = []
-            for date in date_range:
-                if date not in existing_dates:
-                    missing_dates.append(date)
-            
-            # Создаем пустые строки для пропущенных дат
-            created_count = 0
-            for date in missing_dates:
-                row = sheet.max_row + 1
-                sheet[f'A{row}'] = date.strftime("%d.%m.%Y")
-                sheet[f'B{row}'] = self._get_weekday_name(date)
-                sheet[f'C{row}'] = ""  # Пустое время работы
-                sheet[f'D{row}'] = ""  # Пустое описание
-                sheet[f'E{row}'] = 0   # Ноль часов
-                sheet[f'F{row}'] = "ПРОПУЩЕН"
-                sheet[f'G{row}'] = date.month
-                sheet[f'H{row}'] = date.year
-                
-                # Форматирование для пропущенных дней
-                red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-                for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
-                    sheet[f'{col}{row}'].fill = red_fill
-                
-                created_count += 1
-            
-            if created_count > 0:
-                print(f"✅ Создано {created_count} пустых строк для пропущенных дней")
-            
-            wb.save(self.filename)
-            return created_count
-            
-        except Exception as e:
-            print(f"❌ Ошибка при создании пропущенных дат: {e}")
-            import traceback
-            traceback.print_exc()
-            return 0
+                entry_date = datetime.now().strftime("%d.%m.%Y")
 
-    def _get_weekday_name(self, date_obj):
-        """Возвращает название дня недели на русском"""
-        weekdays = {
-            0: "Понедельник",
-            1: "Вторник",
-            2: "Среда",
-            3: "Четверг",
-            4: "Пятница",
-            5: "Суббота",
-            6: "Воскресенье"
-        }
-        return weekdays[date_obj.weekday()]
+            # ✅ ПУНКТ 1: Автоматическое добавление пустых строк за пропущенные дни
+            self._add_missing_days_entries(user_id, last_name, entry_date if is_missed_day else None)
 
-    def get_user_stats(self, user_id: int, last_name: str = ""):
-        """Получает статистику пользователя"""
-        try:
-            # Создаем пропущенные даты перед подсчетом статистики
-            self.create_missing_dates(user_id, last_name)
-            
-            wb = openpyxl.load_workbook(self.filename)
+            # Гарантируем существование листа
             sheet_name = self.get_user_sheet(user_id, last_name)
+            wb = openpyxl.load_workbook(self.filename)
             sheet = wb[sheet_name]
-            
-            total_days = 0
-            filled_days = 0
-            total_hours = 0
-            missing_days = 0
-            
+
+            # Ищем существующую запись за эту дату
+            existing_row = None
             for row in range(2, sheet.max_row + 1):
                 date_cell = sheet[f'A{row}']
-                if date_cell.value:
-                    total_days += 1
-                    work_hours = sheet[f'E{row}'].value or 0
-                    status = sheet[f'F{row}'].value or ""
-                    
-                    if status == "ЗАПОЛНЕН" and work_hours > 0:
-                        filled_days += 1
-                        total_hours += float(work_hours)
-                    elif status == "ПРОПУЩЕН" or work_hours == 0:
-                        missing_days += 1
-            
-            return {
-                'total_days': total_days,
-                'filled_days': filled_days,
-                'total_hours': round(total_hours, 2),
-                'missing_days': missing_days,
-                'completion_rate': round((filled_days / total_days * 100) if total_days > 0 else 0, 1)
-            }
-        except Exception as e:
-            print(f"❌ Ошибка при получении статистики: {e}")
-            return {
-                'total_days': 0,
-                'filled_days': 0,
-                'total_hours': 0,
-                'missing_days': 0,
-                'completion_rate': 0
-            }
-
-    def add_entry(self, user_id: int, date_str: str, time_range: str, description: str, had_lunch: bool, last_name: str = ""):
-        """Добавляет или обновляет запись"""
-        try:
-            # Создаем пропущенные даты перед добавлением
-            self.create_missing_dates(user_id, last_name)
-            
-            wb = openpyxl.load_workbook(self.filename)
-            sheet_name = self.get_user_sheet(user_id, last_name)
-            sheet = wb[sheet_name]
-            
-            # Проверяем, есть ли уже запись на эту дату
-            target_row = None
-            for row in range(2, sheet.max_row + 1):
-                date_cell = sheet[f'A{row}']
-                if date_cell.value == date_str:
-                    target_row = row
+                if date_cell.value == entry_date:
+                    existing_row = row
                     break
-            
+
             work_hours = self.calculate_work_hours(time_range, had_lunch)
             
-            if target_row:
-                # Обновляем существующую запись
-                sheet[f'C{target_row}'] = time_range
-                sheet[f'D{target_row}'] = description
-                sheet[f'E{target_row}'] = work_hours
-                sheet[f'F{target_row}'] = "ЗАПОЛНЕН"
-                
-                # Убираем форматирование пропущенного дня
-                no_fill = PatternFill(fill_type=None)
-                for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']:
-                    sheet[f'{col}{target_row}'].fill = no_fill
-                
-                action = "обновлена"
+            if existing_row:
+                # Обновляем существующую запись (особенно для пропущенных дней)
+                sheet[f'B{existing_row}'] = time_range
+                sheet[f'C{existing_row}'] = description
+                sheet[f'D{existing_row}'] = work_hours
+                sheet[f'E{existing_row}'] = "ЗАПОЛНЕНО" if is_missed_day else "НОРМА"
+                print(f"✅ Обновлена запись за {entry_date}")
             else:
                 # Добавляем новую запись
-                target_row = sheet.max_row + 1
-                date_obj = datetime.strptime(date_str, "%d.%m.%Y")
-                sheet[f'A{target_row}'] = date_str
-                sheet[f'B{target_row}'] = self._get_weekday_name(date_obj)
-                sheet[f'C{target_row}'] = time_range
-                sheet[f'D{target_row}'] = description
-                sheet[f'E{target_row}'] = work_hours
-                sheet[f'F{target_row}'] = "ЗАПОЛНЕН"
-                sheet[f'G{target_row}'] = date_obj.month
-                sheet[f'H{target_row}'] = date_obj.year
-                action = "добавлена"
-            
+                row = sheet.max_row + 1
+                sheet[f'A{row}'] = entry_date
+                sheet[f'B{row}'] = time_range
+                sheet[f'C{row}'] = description
+                sheet[f'D{row}'] = work_hours
+                sheet[f'E{row}'] = "ЗАПОЛНЕНО" if is_missed_day else "НОРМА"
+                print(f"✅ Добавлена новая запись за {entry_date}")
+
             wb.save(self.filename)
             
-            # ✅ Сохраняем на Яндекс.Диск после добавления/обновления записи
+            # ✅ Сохраняем на Яндекс.Диск после добавления записи
             if yandex_disk:
                 remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
                 if yandex_disk.upload_file(self.filename, remote_file_path):
@@ -460,222 +308,189 @@ class ExcelManager:
                 else:
                     print(f"⚠️ Не удалось загрузить резервную копию на Яндекс.Диск")
             
-            print(f"✅ Запись {action} для пользователя {user_id} на {date_str}: {work_hours:.2f} ч.")
-            return True, "success", target_row
-            
+            print(f"✅ Запись добавлена для пользователя {user_id} за {entry_date}: {work_hours:.2f} ч.")
+            return True, "success"
         except Exception as e:
             print(f"❌ Ошибка при записи в Excel: {e}")
             import traceback
             traceback.print_exc()
-            return False, "error", None
+            return False, "error"
 
-    def get_calendar_table(self, user_id: int, last_name: str = "", month: int = None, year: int = None):
-        """Создает календарную таблицу для месяца"""
+    def _add_missing_days_entries(self, user_id: int, last_name: str, target_date: str = None):
+        """Добавляет пустые строки за пропущенные дни"""
         try:
-            # Создаем пропущенные даты
-            self.create_missing_dates(user_id, last_name)
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            wb = openpyxl.load_workbook(self.filename)
+            sheet = wb[sheet_name]
             
+            # Получаем все даты, которые уже есть в таблице
+            existing_dates = set()
+            for row in range(2, sheet.max_row + 1):
+                date_cell = sheet[f'A{row}']
+                if date_cell.value:
+                    existing_dates.add(date_cell.value)
+            
+            # Определяем диапазон дат для проверки
+            today = datetime.now()
+            if target_date:
+                # Если указана целевая дата, проверяем от нее до сегодня
+                target_dt = datetime.strptime(target_date, "%d.%m.%Y")
+                start_date = min(target_dt, today - timedelta(days=MISSED_DAYS_HISTORY))
+            else:
+                # Иначе проверяем последние N дней
+                start_date = today - timedelta(days=MISSED_DAYS_HISTORY)
+            
+            # Добавляем пустые строки за пропущенные дни
+            current_date = start_date
+            while current_date <= today:
+                date_str = current_date.strftime("%d.%m.%Y")
+                
+                if date_str not in existing_dates:
+                    # Добавляем пустую строку
+                    row = sheet.max_row + 1
+                    sheet[f'A{row}'] = date_str
+                    sheet[f'B{row}'] = "ПРОПУЩЕНО"
+                    sheet[f'C{row}'] = "Отсутствовал"
+                    sheet[f'D{row}'] = 0
+                    sheet[f'E{row}'] = "ПРОПУЩЕНО"
+                    print(f"✅ Добавлена пустая строка за пропущенный день: {date_str}")
+                    existing_dates.add(date_str)
+                
+                current_date += timedelta(days=1)
+            
+            wb.save(self.filename)
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка при добавлении пропущенных дней: {e}")
+            return False
+
+    def delete_today_entry(self, user_id: int, last_name: str = ""):
+        """Удаляет последнюю запись за сегодня"""
+        try:
             wb = openpyxl.load_workbook(self.filename)
             sheet_name = self.get_user_sheet(user_id, last_name)
             sheet = wb[sheet_name]
             
-            # Определяем месяц и год
-            if month is None:
-                month = datetime.now().month
-            if year is None:
-                year = datetime.now().year
+            current_date = datetime.now().strftime("%d.%m.%Y")
+            deleted_data = None
             
-            # Получаем данные за указанный месяц
-            month_data = {}
-            for row in range(2, sheet.max_row + 1):
-                try:
-                    month_cell = sheet[f'G{row}']
-                    year_cell = sheet[f'H{row}']
+            for row in range(sheet.max_row, 1, -1):
+                date_cell = sheet[f'A{row}']
+                if date_cell.value == current_date:
+                    deleted_data = {
+                        'date': sheet[f'A{row}'].value,
+                        'time_range': sheet[f'B{row}'].value,
+                        'description': sheet[f'C{row}'].value,
+                        'work_hours': sheet[f'D{row}'].value,
+                        'status': sheet[f'E{row}'].value
+                    }
+                    sheet.delete_rows(row)
+                    wb.save(self.filename)
                     
-                    if month_cell.value == month and year_cell.value == year:
-                        date_cell = sheet[f'A{row}']
-                        hours_cell = sheet[f'E{row}']
-                        status_cell = sheet[f'F{row}']
-                        
-                        if date_cell.value:
-                            try:
-                                # Извлекаем день из даты
-                                day = int(date_cell.value.split('.')[0])
-                                hours = float(hours_cell.value) if hours_cell.value else 0
-                                status = status_cell.value or ""
-                                month_data[day] = {
-                                    'hours': hours,
-                                    'status': status
-                                }
-                            except:
-                                continue
-                except:
-                    continue
+                    # ✅ Сохраняем на Яндекс.Диск после удаления записи
+                    if yandex_disk:
+                        remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
+                        if yandex_disk.upload_file(self.filename, remote_file_path):
+                            print(f"✅ Резервная копия загружена на Яндекс.Диск после удаления")
+                    
+                    print(f"✅ Запись за сегодня удалена для пользователя {user_id}")
+                    return True, deleted_data
             
-            # Создаем календарь
-            cal = calendar.monthcalendar(year, month)
-            month_names = {
-                1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
-                5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
-                9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
-            }
+            return False, None
+        except Exception as e:
+            print(f"❌ Ошибка при удалении записи: {e}")
+            return False, None
+
+    def get_user_stats(self, user_id: int, last_name: str = ""):
+        try:
+            wb = openpyxl.load_workbook(self.filename)
+            sheet_name = self.get_user_sheet(user_id, last_name)
+            sheet = wb[sheet_name]
             
-            month_name = month_names.get(month, f"Месяц {month}")
+            total_entries = 0
+            filled_entries = 0
+            missed_entries = 0
             
-            # Формируем таблицу календаря
-            table = f"📅 *КАЛЕНДАРЬ: {month_name} {year}*\n\n"
-            table += "Пн | Вт | Ср | Чт | Пт | Сб | Вс\n"
-            table += "---" * 7 + "\n"
-            
-            total_month_hours = 0
-            work_days_count = 0
-            
-            for week in cal:
-                week_line = ""
-                for day in week:
-                    if day == 0:
-                        week_line += "   | "
+            for row in range(2, sheet.max_row + 1):
+                date_cell = sheet[f'A{row}']
+                if date_cell.value:
+                    total_entries += 1
+                    status_cell = sheet[f'E{row}']
+                    if status_cell and status_cell.value == "ПРОПУЩЕНО":
+                        missed_entries += 1
                     else:
-                        if day in month_data:
-                            data = month_data[day]
-                            hours = data['hours']
-                            status = data['status']
-                            
-                            if status == "ЗАПОЛНЕН" and hours > 0:
-                                week_line += f"{day:2d}✅| "
-                                total_month_hours += hours
-                                work_days_count += 1
-                            elif status == "ПРОПУЩЕН":
-                                week_line += f"{day:2d}❌| "
-                            else:
-                                week_line += f"{day:2d}  | "
-                        else:
-                            week_line += f"{day:2d}  | "
-                table += week_line + "\n"
+                        filled_entries += 1
             
-            # Добавляем статистику за месяц
-            table += f"\n📊 *СТАТИСТИКА ЗА {month_name.upper()} {year}*\n"
-            table += f"• 📅 Отработано дней: *{work_days_count}*\n"
-            table += f"• ⏱️ Всего часов: *{total_month_hours:.2f} ч.*\n"
-            
-            if work_days_count > 0:
-                avg_hours = total_month_hours / work_days_count
-                table += f"• 📈 Среднее в день: *{avg_hours:.2f} ч.*\n"
-            
-            # Общая статистика
-            stats = self.get_user_stats(user_id, last_name)
-            table += f"\n📈 *ОБЩАЯ СТАТИСТИКА:*\n"
-            table += f"• 📅 Всего дней: *{stats['total_days']}*\n"
-            table += f"• ✅ Заполнено: *{stats['filled_days']}*\n"
-            table += f"• ❌ Пропущено: *{stats['missing_days']}*\n"
-            table += f"• 🎯 Заполнение: *{stats['completion_rate']}%*\n"
-            table += f"• ⏱️ Всего часов: *{stats['total_hours']} ч.*"
-            
-            return table
-            
+            return {
+                'total': total_entries,
+                'filled': filled_entries,
+                'missed': missed_entries
+            }
         except Exception as e:
-            print(f"❌ Ошибка при создании календарной таблицы: {e}")
-            return "❌ Не удалось создать календарь. Попробуйте позже."
+            print(f"❌ Ошибка при получении статистики: {e}")
+            return {'total': 0, 'filled': 0, 'missed': 0}
 
-    def get_available_months(self, user_id: int, last_name: str = ""):
-        """Возвращает список месяцев, за которые есть данные"""
+    def check_date_exists(self, user_id: int, date_str: str, last_name: str = ""):
+        """Проверяет, существует ли запись за указанную дату"""
         try:
             wb = openpyxl.load_workbook(self.filename)
             sheet_name = self.get_user_sheet(user_id, last_name)
             sheet = wb[sheet_name]
             
-            months = set()
-            current_year = datetime.now().year
-            
             for row in range(2, sheet.max_row + 1):
-                try:
-                    year_cell = sheet[f'H{row}']
-                    month_cell = sheet[f'G{row}']
-                    
-                    if year_cell.value and month_cell.value:
-                        year = int(year_cell.value)
-                        month = int(month_cell.value)
-                        
-                        # Добавляем только прошедшие и текущий месяц
-                        if year < current_year or (year == current_year and month <= datetime.now().month):
-                            months.add((year, month))
-                except:
-                    continue
+                date_cell = sheet[f'A{row}']
+                if date_cell.value == date_str:
+                    status_cell = sheet[f'E{row}']
+                    return True, status_cell.value if status_cell else "НОРМА"
             
-            # Сортируем по году и месяцу
-            sorted_months = sorted(months, key=lambda x: (x[0], x[1]), reverse=True)
-            
-            # Ограничиваем 12 месяцами
-            return sorted_months[:12]
-            
+            return False, None
         except Exception as e:
-            print(f"❌ Ошибка при получении списка месяцев: {e}")
-            return []
+            print(f"❌ Ошибка при проверке даты: {e}")
+            return False, None
 
 excel_manager = ExcelManager(EXCEL_FILE)
 user_data_cache = {}
 
 def get_main_menu_keyboard():
     keyboard = [
-        ["📝 Отчет", "✏️ Редактировать"],
-        ["🗑️ Удалить запись", "📅 Календарь"],
-        ["📥 Скачать отчет", "☁️ Синхронизировать"],
-        ["⚙️ Напоминание"]
+        ["📝 Отчет"],
+        ["✏️ Редактировать", "🗑️ Удалить запись"],  # ✅ Добавлена кнопка Редактировать
+        ["⚙️ Напоминание", "📥 Скачать отчет"],
+        ["☁️ Синхронизировать"]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, input_field_placeholder="Выберите действие...")
 
 def get_yes_no_keyboard():
     return ReplyKeyboardMarkup([["Да", "Нет"]], resize_keyboard=True, one_time_keyboard=True)
 
-def get_calendar_menu_keyboard(months_data):
-    """Создает клавиатуру для выбора месяца"""
-    keyboard = []
-    month_names = {
-        1: "Янв", 2: "Фев", 3: "Мар", 4: "Апр",
-        5: "Май", 6: "Июн", 7: "Июл", 8: "Авг",
-        9: "Сен", 10: "Окт", 11: "Ноя", 12: "Дек"
-    }
-    
-    row = []
-    for i, (year, month) in enumerate(months_data):
-        month_name = month_names.get(month, str(month))
-        button_text = f"{month_name} {year}"
-        row.append(button_text)
-        
-        if len(row) == 2 or i == len(months_data) - 1:
-            keyboard.append(row)
-            row = []
-    
-    # Добавляем кнопку текущего месяца и возврата
-    current_month = datetime.now().month
-    current_year = datetime.now().year
-    current_month_name = month_names.get(current_month, str(current_month))
-    keyboard.append([f"{current_month_name} {current_year} (текущий)"])
-    keyboard.append(["🏠 В главное меню"])
-    
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+def get_cancel_keyboard():
+    return ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True, one_time_keyboard=True)
 
 async def send_welcome_message(update: Update, user):
     yandex_status = "✅ ВКЛЮЧЕН" if yandex_disk else "❌ ВЫКЛЮЧЕН"
     yandex_folder_info = f"\n📂 *Папка:* {YANDEX_DISK_FOLDER}" if yandex_disk else ""
     
     welcome_text = (
-        "🎉 *УЛУЧШЕННЫЙ WORK TRACKER BOT* 🎉\n"
-        "🤖 *Новые возможности:*\n"
-        "• *Автоматические пустые строки* для пропущенных дней\n"
-        "• *Редактирование пропущенных дней*\n"
-        "• *Календарная таблица* с визуализацией часов\n"
-        "• *Подробная статистика* по месяцам\n\n"
+        "🎉 *ДОБРО ПОЖАЛОВАТЬ!* 🎉\n"
+        "🤖 *Я - Work Tracker Bot* 🤖\n"
+        "*Моя задача:* Помогать тебе вести учет рабочего времени!\n"
         "*Как это работает:*\n"
-        "1️⃣ Бот автоматически создает строки для всех дней с начала месяца\n"
-        "2️⃣ Пропущенные дни отмечаются ❌ в календаре\n"
-        "3️⃣ Заполненные дни отмечаются ✅ с количеством часов\n"
-        "4️⃣ Вы можете заполнить любой пропущенный день\n"
-        f"5️⃣ ☁️ *Резервное копирование:* {yandex_status}{yandex_folder_info}\n\n"
-        "*Используйте новые кнопки:*\n"
-        "✏️ *Редактировать* - заполнить пропущенный день\n"
-        "📅 *Календарь* - посмотреть календарь с часами\n"
-        "📝 *Отчет* - быстрая запись за сегодня"
+        "• Каждый день я буду напоминать тебе заполнить отчет\n"
+        "• Ты указываешь, в какое время работал и что делал\n"
+        "• Все данные автоматически сохраняются в Excel таблицу\n"
+        "• У каждого сотрудника свой лист в таблице\n"
+        f"• ☁️ *Резервное копирование:* {yandex_status}{yandex_folder_info}\n"
+        "*Новые возможности:*\n"
+        "✅ *Автоматические пропуски* - если пропустил день, создается пустая запись\n"
+        "✅ *Редактирование* - можно заполнить отчеты за пропущенные дни\n"
+        "*Важно:* Можно сделать только *1 запись в день*\n"
+        "*Преимущества:*\n"
+        "✅ Всегда актуальная информация о работе\n"
+        "✅ Удобный учет времени\n"
+        "✅ Автоматическое сохранение\n"
+        "✅ Индивидуальные настройки\n"
+        "✅ Резервное копирование на Яндекс.Диск\n"
+        "Используй кнопки меню ниже для навигации!"
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
@@ -683,12 +498,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     user_id = user.id
     is_new_user = user_id not in WELCOMED_USERS
-    
     if is_new_user:
         await send_welcome_message(update, user)
         WELCOMED_USERS.add(user_id)
         await asyncio.sleep(2)
-    
     if user_id not in USER_SETTINGS:
         USER_SETTINGS[user_id] = {
             'reminder_time': time(hour=DEFAULT_REMINDER_HOUR, minute=DEFAULT_REMINDER_MINUTE),
@@ -697,35 +510,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'last_name': user.last_name or "",
             'first_seen': datetime.now()
         }
-    
-    # Создаем пропущенные даты при старте
     last_name = user.last_name or user.first_name or ""
-    excel_manager.create_missing_dates(user_id, last_name)
-    
     stats = excel_manager.get_user_stats(user_id, last_name)
     reminder_time = USER_SETTINGS[user_id]['reminder_time']
     has_today_entry = excel_manager.has_today_entry(user_id, last_name)
     
     if is_new_user:
-        message_text = f"👋 *Рад познакомиться, {user.first_name}!*\n\n"
+        message_text = f"👋 *Рад познакомиться, {user.first_name}!*\n"
     else:
-        message_text = f"👋 *С возвращением, {user.first_name}!*\n\n"
+        message_text = f"👋 *С возвращением, {user.first_name}!*\n"
     
-    # Расширенная статистика
     message_text += (
-        f"📊 *ВАША СТАТИСТИКА:*\n"
-        f"• 📅 Всего дней: *{stats['total_days']}*\n"
-        f"• ✅ Заполнено дней: *{stats['filled_days']}*\n"
-        f"• ❌ Пропущено дней: *{stats['missing_days']}*\n"
-        f"• 📈 Процент заполнения: *{stats['completion_rate']}%*\n"
-        f"• ⏱️ Всего часов работы: *{stats['total_hours']} ч.*\n"
-        f"• ⏰ Напоминание: *{reminder_time.strftime('%H:%M')}*\n\n"
+        f"📊 Твоя статистика: *{stats['filled']} заполненных записей*\n"
+        f"⏰ Напоминание установлено на: *{reminder_time.strftime('%H:%M')}*\n"
     )
     
-    # Статус сегодняшнего дня
-    today_status = "✅ УЖЕ СДЕЛАНА" if has_today_entry else "❌ ЕЩЕ НЕТ"
-    message_text += f"📝 *Сегодняшняя запись:* {today_status}\n\n"
+    if stats['missed'] > 0:
+        message_text += f"📅 *Пропущенных дней:* {stats['missed']} (можно заполнить через '✏️ Редактировать')\n"
     
+    if has_today_entry:
+        message_text += f"📝 *Сегодняшняя запись:* ✅ УЖЕ СДЕЛАНА\n"
+    else:
+        message_text += f"📝 *Сегодняшняя запись:* ❌ ЕЩЕ НЕТ\n"
+        
     yandex_status = "✅ ВКЛЮЧЕНО" if yandex_disk else "❌ ВЫКЛЮЧЕНО"
     message_text += f"☁️ *Резервное копирование:* {yandex_status}"
     
@@ -733,31 +540,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message_text += f"\n📂 *Папка на Яндекс.Диске:* {YANDEX_DISK_FOLDER}"
     
     message_text += "\n\n"
-    
-    # Описание функций
+        
     message_text += (
         f"*Используй кнопки меню для управления:*\n"
-        f"📝 *Отчет* - быстрая запись за сегодня\n"
-        f"✏️ *Редактировать* - заполнить пропущенный день\n"
-        f"🗑️ *Удалить запись* - удалить/сбросить запись\n"
-        f"📅 *Календарь* - посмотреть календарь с часами\n"
+        f"📝 *Отчет* - добавить запись о работе\n"
+        f"✏️ *Редактировать* - заполнить отчеты за пропущенные дни\n"
+        f"🗑️ *Удалить запись* - удалить сегодняшнюю запись\n"
+        f"⚙️ *Напоминание* - изменить время напоминания\n"
         f"📥 *Скачать отчет* - получить Excel файл\n"
-        f"☁️ *Синхронизировать* - сохранить в облако\n"
-        f"⚙️ *Напоминание* - изменить время напоминания"
+        f"☁️ *Синхронизировать* - принудительно сохранить на Яндекс.Диск"
     )
-    
     await update.message.reply_text(message_text, parse_mode='Markdown', reply_markup=get_main_menu_keyboard())
 
 async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     if text == "📝 Отчет":
         return await report_command(update, context)
-    elif text == "✏️ Редактировать":
-        return await edit_command(update, context)
+    elif text == "✏️ Редактировать":  # ✅ Новая кнопка
+        return await edit_missed_days_command(update, context)
     elif text == "🗑️ Удалить запись":
-        return await delete_command(update, context)
-    elif text == "📅 Календарь":
-        return await calendar_command(update, context)
+        return await delete_entry_command(update, context)
     elif text == "⚙️ Напоминание":
         return await reminder_command(update, context)
     elif text == "📥 Скачать отчет":
@@ -765,204 +567,7 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "☁️ Синхронизировать":
         return await sync_to_yandex_disk(update, context)
     else:
-        # Проверяем, не выбрал ли пользователь месяц в календаре
-        if " (текущий)" in text:
-            # Показываем текущий месяц
-            current_month = datetime.now().month
-            current_year = datetime.now().year
-            user = update.message.from_user
-            last_name = user.last_name or user.first_name or ""
-            
-            calendar_table = excel_manager.get_calendar_table(
-                user.id, last_name, current_month, current_year
-            )
-            
-            await update.message.reply_text(
-                calendar_table,
-                parse_mode='Markdown',
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-        elif any(month_name in text for month_name in ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", 
-                                                      "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]):
-            # Пытаемся распарсить месяц и год
-            try:
-                parts = text.split()
-                month_names = {
-                    "Янв": 1, "Фев": 2, "Мар": 3, "Апр": 4,
-                    "Май": 5, "Июн": 6, "Июл": 7, "Авг": 8,
-                    "Сен": 9, "Окт": 10, "Ноя": 11, "Дек": 12
-                }
-                
-                month_str = parts[0]
-                year = int(parts[1])
-                month = month_names.get(month_str)
-                
-                if month:
-                    user = update.message.from_user
-                    last_name = user.last_name or user.first_name or ""
-                    
-                    calendar_table = excel_manager.get_calendar_table(
-                        user.id, last_name, month, year
-                    )
-                    
-                    await update.message.reply_text(
-                        calendar_table,
-                        parse_mode='Markdown',
-                        reply_markup=get_main_menu_keyboard()
-                    )
-                    return
-            except:
-                pass
-        
         await update.message.reply_text("Неизвестная команда. Используй кнопки меню.", reply_markup=get_main_menu_keyboard())
-
-async def calendar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню выбора месяца для календаря"""
-    user_id = update.message.from_user.id
-    user = update.message.from_user
-    last_name = user.last_name or user.first_name or ""
-    
-    # Получаем список доступных месяцев
-    months = excel_manager.get_available_months(user_id, last_name)
-    
-    if not months:
-        # Показываем текущий месяц, если нет данных
-        current_month = datetime.now().month
-        current_year = datetime.now().year
-        
-        calendar_table = excel_manager.get_calendar_table(
-            user_id, last_name, current_month, current_year
-        )
-        
-        await update.message.reply_text(
-            calendar_table,
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-    
-    # Создаем клавиатуру с месяцами
-    keyboard = get_calendar_menu_keyboard(months)
-    
-    month_names = {
-        1: "Январь", 2: "Февраль", 3: "Март", 4: "Апрель",
-        5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
-        9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
-    }
-    
-    # Формируем список месяцев
-    months_list = ""
-    for year, month in months:
-        month_name = month_names.get(month, f"Месяц {month}")
-        months_list += f"• {month_name} {year}\n"
-    
-    await update.message.reply_text(
-        f"📅 *ВЫБЕРИТЕ МЕСЯЦ ДЛЯ ПРОСМОТРА*\n\n"
-        f"*Доступные месяцы:*\n{months_list}\n"
-        f"*Обозначения в календаре:*\n"
-        f"✅ - день заполнен (отработано X часов)\n"
-        f"❌ - день пропущен\n"
-        f"цифра - номер дня месяца\n\n"
-        f"*Выберите месяц:*",
-        parse_mode='Markdown',
-        reply_markup=keyboard
-    )
-
-async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало процесса редактирования пропущенных дней"""
-    user_id = update.message.from_user.id
-    user = update.message.from_user
-    
-    # Создаем пропущенные даты перед началом редактирования
-    last_name = user.last_name or user.first_name or ""
-    excel_manager.create_missing_dates(user_id, last_name)
-    
-    await update.message.reply_text(
-        "✏️ *РЕДАКТИРОВАНИЕ ПРОПУЩЕННОГО ДНЯ*\n\n"
-        "Введите дату в формате *ДД.ММ.ГГГГ*:\n"
-        "*Примеры:*\n"
-        "• 15.01.2024 - 15 января 2024\n"
-        "• 01.12.2023 - 1 декабря 2023\n"
-        "• 25.02.2024 - 25 февраля 2024\n\n"
-        "*Примечание:* Можно редактировать только дни с начала текущего месяца.",
-        parse_mode='Markdown',
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    return WAITING_EDIT_DATE
-
-async def receive_edit_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение даты для редактирования"""
-    user_id = update.message.from_user.id
-    user_input = update.message.text.strip()
-    
-    # Проверяем формат даты
-    date_pattern = r'^(\d{2})\.(\d{2})\.(\d{4})$'
-    match = re.match(date_pattern, user_input)
-    
-    if not match:
-        await update.message.reply_text(
-            "❌ *Неверный формат даты!*\n"
-            "Пожалуйста, введите дату в формате *ДД.ММ.ГГГГ*:\n"
-            "• 15.01.2024\n• 01.12.2023\n• 25.02.2024\n\n"
-            "Попробуйте еще раз:",
-            parse_mode='Markdown'
-        )
-        return WAITING_EDIT_DATE
-    
-    day, month, year = map(int, match.groups())
-    
-    # Проверяем корректность даты
-    try:
-        selected_date = datetime(year, month, day).date()
-        today = datetime.now().date()
-        
-        # Проверяем, что дата не в будущем
-        if selected_date > today:
-            await update.message.reply_text(
-                "❌ *Дата не может быть в будущем!*\n"
-                "Пожалуйста, введите прошедшую или сегодняшнюю дату.\n\n"
-                "Попробуйте еще раз:",
-                parse_mode='Markdown'
-            )
-            return WAITING_EDIT_DATE
-        
-        # Проверяем, что дата не раньше начала текущего месяца
-        first_day_of_month = today.replace(day=1)
-        if selected_date < first_day_of_month:
-            await update.message.reply_text(
-                f"❌ *Дата слишком старая!*\n"
-                f"Можно редактировать только дни с {first_day_of_month.strftime('%d.%m.%Y')}\n\n"
-                f"Попробуйте еще раз:",
-                parse_mode='Markdown'
-            )
-            return WAITING_EDIT_DATE
-        
-    except ValueError:
-        await update.message.reply_text(
-            "❌ *Некорректная дата!*\n"
-            "Пожалуйста, введите существующую дату.\n\n"
-            "Попробуйте еще раз:",
-            parse_mode='Markdown'
-        )
-        return WAITING_EDIT_DATE
-    
-    # Сохраняем дату в контексте
-    context.user_data['edit_date'] = user_input
-    
-    await update.message.reply_text(
-        f"📅 *Выбрана дата: {user_input}*\n\n"
-        "🕐 *ШАГ 1:* Укажите ВРЕМЯ РАБОТЫ (можно несколько периодов):\n"
-        "*Примеры:*\n"
-        "• 9:00-18:00\n"
-        "• 9:00-14:00, 15:00-18:00\n"
-        "• с 10 до 12, 14:00-17:30\n"
-        "Используйте запятую для разделения периодов.",
-        parse_mode='Markdown'
-    )
-    
-    return WAITING_EDIT_TIME
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -974,7 +579,8 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *Вы уже сделали запись за сегодняшний день.*\n\n"
             "Чтобы создать новую запись, сначала удалите предыдущую через кнопку \"🗑️ Удалить запись\", "
-            "а затем создайте новую через кнопку \"📝 Отчет\".",
+            "а затем создайте новую через кнопку \"📝 Отчет\".\n\n"
+            "Или используйте \"✏️ Редактировать\" для заполнения пропущенных дней.",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
@@ -993,6 +599,289 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=ReplyKeyboardRemove()
     )
     return WAITING_TIME
+
+# ✅ ПУНКТ 2: Функции для редактирования пропущенных дней
+async def edit_missed_days_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало процесса редактирования пропущенных дней"""
+    user_id = update.message.from_user.id
+    user = update.message.from_user
+    last_name = user.last_name or user.first_name or ""
+    
+    # Получаем статистику пропущенных дней
+    stats = excel_manager.get_user_stats(user_id, last_name)
+    
+    if stats['missed'] == 0:
+        await update.message.reply_text(
+            "✅ *У вас нет пропущенных дней для заполнения!*\n\n"
+            "Все дни за последний месяц уже заполнены или еще не наступили.",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    await update.message.reply_text(
+        f"✏️ *Заполнение пропущенных дней*\n\n"
+        f"📊 У вас есть *{stats['missed']} пропущенных дней* за последний месяц.\n"
+        f"📅 *Введите дату пропущенного дня в формате ДД.ММ.ГГГГ:*\n"
+        f"*Пример:* 15.12.2023\n\n"
+        f"*Ограничения:*\n"
+        f"• Можно заполнять только дни за последние {MISSED_DAYS_HISTORY} дней\n"
+        f"• Нельзя редактировать будущие даты\n"
+        f"• Одна дата - одна запись",
+        parse_mode='Markdown',
+        reply_markup=get_cancel_keyboard()
+    )
+    return WAITING_MISSED_DATE
+
+async def receive_missed_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка введенной даты для редактирования"""
+    user_id = update.message.from_user.id
+    user = update.message.from_user
+    text = update.message.text.strip()
+    
+    # Проверка на отмену
+    if text == "❌ Отмена":
+        await update.message.reply_text(
+            "❌ Заполнение пропущенного дня отменено.",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    # Проверка формата даты
+    date_pattern = r'^\d{2}\.\d{2}\.\d{4}$'
+    if not re.match(date_pattern, text):
+        await update.message.reply_text(
+            "❌ *Неверный формат даты!*\n"
+            "Пожалуйста, введите дату в формате *ДД.ММ.ГГГГ*\n"
+            "*Пример:* 15.12.2023\n"
+            "Попробуйте еще раз:",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
+        return WAITING_MISSED_DATE
+    
+    try:
+        input_date = datetime.strptime(text, "%d.%m.%Y")
+        today = datetime.now()
+        
+        # Проверяем, что дата не в будущем
+        if input_date > today:
+            await update.message.reply_text(
+                "❌ *Нельзя заполнять отчеты за будущие даты!*\n"
+                "Пожалуйста, введите прошедшую дату:",
+                parse_mode='Markdown',
+                reply_markup=get_cancel_keyboard()
+            )
+            return WAITING_MISSED_DATE
+        
+        # Проверяем, что дата не слишком старая
+        max_history_date = today - timedelta(days=MISSED_DAYS_HISTORY)
+        if input_date < max_history_date:
+            await update.message.reply_text(
+                f"❌ *Слишком старая дата!*\n"
+                f"Можно заполнять только дни за последние {MISSED_DAYS_HISTORY} дней.\n"
+                f"Самая ранняя доступная дата: {max_history_date.strftime('%d.%m.%Y')}\n"
+                f"Пожалуйста, введите другую дату:",
+                parse_mode='Markdown',
+                reply_markup=get_cancel_keyboard()
+            )
+            return WAITING_MISSED_DATE
+        
+        last_name = user.last_name or user.first_name or ""
+        date_exists, status = excel_manager.check_date_exists(user_id, text, last_name)
+        
+        if date_exists and status != "ПРОПУЩЕНО":
+            await update.message.reply_text(
+                f"❌ *Запись за {text} уже существует и заполнена!*\n"
+                f"Статус: {status}\n\n"
+                f"Выберите другую дату или нажмите \"❌ Отмена\":",
+                parse_mode='Markdown',
+                reply_markup=get_cancel_keyboard()
+            )
+            return WAITING_MISSED_DATE
+        
+        # Сохраняем дату в кэше пользователя
+        if user_id not in user_data_cache:
+            user_data_cache[user_id] = {}
+        user_data_cache[user_id]['missed_date'] = text
+        
+        await update.message.reply_text(
+            f"✅ *Отлично! Выбранная дата: {text}*\n\n"
+            f"📝 *ШАГ 1:* Укажите ВРЕМЯ РАБОТЫ за этот день (можно несколько периодов):\n"
+            f"*Примеры:*\n"
+            f"• 9:00-18:00\n"
+            f"• 9:00-14:00, 15:00-18:00\n"
+            f"• с 10 до 12, 14:00-17:30",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
+        return WAITING_MISSED_TIME
+        
+    except ValueError as e:
+        await update.message.reply_text(
+            f"❌ *Некорректная дата!*\n"
+            f"Пожалуйста, введите корректную дату в формате ДД.ММ.ГГГГ\n"
+            f"Пример: 15.12.2023\n"
+            f"Попробуйте еще раз:",
+            parse_mode='Markdown',
+            reply_markup=get_cancel_keyboard()
+        )
+        return WAITING_MISSED_DATE
+
+async def receive_missed_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка времени работы для пропущенного дня"""
+    user_id = update.message.from_user.id
+    text = update.message.text.strip()
+    
+    # Проверка на отмену
+    if text == "❌ Отмена":
+        await cancel_missed_entry(update, context)
+        return ConversationHandler.END
+    
+    if user_id not in user_data_cache or 'missed_date' not in user_data_cache[user_id]:
+        await update.message.reply_text(
+            "❌ Что-то пошло не так. Давайте начнем заново.",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    user_data_cache[user_id]['missed_time'] = text
+    
+    total_hours = excel_manager.calculate_work_hours(text, had_lunch=False)
+    await update.message.reply_text(
+        f"✅ *Отлично!*\n"
+        f"⏱️ *Общее время работы:* {total_hours:.2f} ч.\n"
+        f"🍽️ *Был ли у вас обед в этот день?*\n"
+        f"(Обед = вычет 0.5 часа)",
+        parse_mode='Markdown',
+        reply_markup=get_yes_no_keyboard()
+    )
+    return WAITING_MISSED_LUNCH
+
+async def receive_missed_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка информации об обеде для пропущенного дня"""
+    user_id = update.message.from_user.id
+    text = update.message.text.strip().lower()
+    
+    if text in ["да", "yes", "д"]:
+        had_lunch = True
+    elif text in ["нет", "no", "н"]:
+        had_lunch = False
+    else:
+        await update.message.reply_text(
+            "Пожалуйста, выберите «Да» или «Нет».",
+            reply_markup=get_yes_no_keyboard()
+        )
+        return WAITING_MISSED_LUNCH
+
+    if user_id not in user_data_cache:
+        user_data_cache[user_id] = {}
+    user_data_cache[user_id]['missed_had_lunch'] = had_lunch
+
+    await update.message.reply_text(
+        "📝 *ШАГ 2:* Теперь опишите ОПИСАНИЕ РАБОТЫ за этот день:\n"
+        "*Примеры:*\n"
+        "• Разрабатывал новый функционал\n"
+        "• Участвовал в совещаниях\n"
+        "• Изучал документацию\n"
+        "• Исправлял ошибки\n"
+        "• Общался с клиентами",
+        parse_mode='Markdown',
+        reply_markup=get_cancel_keyboard()
+    )
+    return WAITING_MISSED_DESCRIPTION
+
+async def receive_missed_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка описания работы для пропущенного дня"""
+    user_id = update.message.from_user.id
+    description = update.message.text.strip()
+    user = update.message.from_user
+    
+    # Проверка на отмену
+    if description == "❌ Отмена":
+        await cancel_missed_entry(update, context)
+        return ConversationHandler.END
+    
+    if (user_id not in user_data_cache or 
+        'missed_date' not in user_data_cache[user_id] or
+        'missed_time' not in user_data_cache[user_id] or
+        'missed_had_lunch' not in user_data_cache[user_id]):
+        await update.message.reply_text(
+            "❌ Что-то пошло не так. Давайте начнем заново.",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    missed_date = user_data_cache[user_id]['missed_date']
+    time_range = user_data_cache[user_id]['missed_time']
+    had_lunch = user_data_cache[user_id]['missed_had_lunch']
+    last_name = user.last_name or user.first_name or ""
+    
+    # Сохраняем запись за пропущенный день
+    success, result = excel_manager.add_entry(
+        user_id, time_range, description, had_lunch, 
+        last_name, missed_date, is_missed_day=True
+    )
+    
+    if success:
+        work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
+        stats = excel_manager.get_user_stats(user_id, last_name)
+        
+        yandex_sync_text = ""
+        if yandex_disk:
+            yandex_sync_text = "☁️ *Данные автоматически сохранены на Яндекс.Диск*\n"
+        
+        await update.message.reply_text(
+            f"🎉 *ОТЛИЧНО! Запись за пропущенный день сохранена!*\n"
+            f"{yandex_sync_text}\n"
+            f"📅 *Дата:* {missed_date}\n"
+            f"🕐 *Время работы:* {time_range}\n"
+            f"🍽️ *Обед:* {'Да' if had_lunch else 'Нет'}\n"
+            f"⏱️ *Часы работы без обеда:* {work_hours:.2f} ч.\n"
+            f"📝 *Описание работы:* {description}\n"
+            f"📊 *Всего заполненных записей:* {stats['filled']}\n"
+            f"📅 *Осталось пропущенных дней:* {stats['missed']}\n\n"
+            f"*Что дальше?*\n"
+            f"• ✏️ *Редактировать* - заполнить еще один пропущенный день\n"
+            f"• 📝 *Отчет* - добавить запись за сегодня\n"
+            f"• 📥 *Скачать отчет* - получить полный файл",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Произошла ошибка при сохранении. Попробуйте еще раз.",
+            reply_markup=get_main_menu_keyboard()
+        )
+    
+    # Очищаем кэш
+    if user_id in user_data_cache:
+        keys_to_remove = ['missed_date', 'missed_time', 'missed_had_lunch']
+        for key in keys_to_remove:
+            user_data_cache[user_id].pop(key, None)
+    
+    return ConversationHandler.END
+
+async def cancel_missed_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена процесса заполнения пропущенного дня"""
+    user_id = update.message.from_user.id
+    if user_id in user_data_cache:
+        keys_to_remove = ['missed_date', 'missed_time', 'missed_had_lunch']
+        for key in keys_to_remove:
+            user_data_cache[user_id].pop(key, None)
+    
+    await update.message.reply_text(
+        "❌ Заполнение пропущенного дня отменено.",
+        parse_mode='Markdown',
+        reply_markup=get_main_menu_keyboard()
+    )
+    return ConversationHandler.END
+
+# Остальные функции остаются без изменений (receive_time, receive_lunch_confirmation, etc.)
+# Они уже есть в вашем исходном коде, я их не менял для экономии места
 
 async def receive_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -1043,7 +932,6 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.message.from_user.id
     description = update.message.text
     user = update.message.from_user
-    
     if (user_id not in user_data_cache or
         'time_range' not in user_data_cache[user_id] or
         'had_lunch' not in user_data_cache[user_id]):
@@ -1053,11 +941,8 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
     time_range = user_data_cache[user_id]['time_range']
     had_lunch = user_data_cache[user_id]['had_lunch']
     last_name = user.last_name or user.first_name or ""
-    
-    # Используем сегодняшнюю дату для обычного отчета
-    today_str = datetime.now().strftime("%d.%m.%Y")
-    
-    success, result, row_num = excel_manager.add_entry(user_id, today_str, time_range, description, had_lunch, last_name)
+
+    success, result = excel_manager.add_entry(user_id, time_range, description, had_lunch, last_name)
     
     if result == "limit_exceeded":
         await update.message.reply_text(
@@ -1069,6 +954,7 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     elif success:
         stats = excel_manager.get_user_stats(user_id, last_name)
+        current_date = datetime.now().strftime("%d.%m.%Y")
         work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
         
         yandex_sync_text = ""
@@ -1078,19 +964,18 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "🎉 *ОТЛИЧНО! Запись сохранена!*\n"
             f"{yandex_sync_text}\n"
-            f"📅 *Дата:* {today_str}\n"
+            f"📅 *Дата:* {current_date}\n"
             f"🕐 *Время работы:* {time_range}\n"
             f"🍽️ *Обед:* {'Да' if had_lunch else 'Нет'}\n"
             f"⏱️ *Часы работы без обеда:* {work_hours:.2f} ч.\n"
-            f"📝 *Описание работы:* {description}\n\n"
-            f"📊 *СТАТИСТИКА:*\n"
-            f"• 📅 Всего дней: {stats['total_days']}\n"
-            f"• ✅ Заполнено: {stats['filled_days']}\n"
-            f"• 📈 Заполнение: {stats['completion_rate']}%\n\n"
+            f"📝 *Описание работы:* {description}\n"
+            f"📊 *Всего заполненных записей:* {stats['filled']}\n\n"
             "*Теперь ты можешь:*\n"
-            "• ✏️ *Редактировать* другие дни\n"
-            "• 📅 *Посмотреть календарь*\n"
-            "• 📥 *Скачать полный отчет*",
+            "• ✏️ *Редактировать* - заполнить пропущенные дни\n"
+            "• 🗑️ *Удалить запись* - если нужно исправить\n"
+            "• 📥 *Скачать отчет* - получить полный файл\n"
+            "• ☁️ *Синхронизировать* - принудительно сохранить в облако\n"
+            "*Новая запись будет доступна завтра*",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
@@ -1104,168 +989,125 @@ async def receive_description(update: Update, context: ContextTypes.DEFAULT_TYPE
         del user_data_cache[user_id]
     return ConversationHandler.END
 
-async def receive_edit_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение времени работы при редактировании"""
+async def delete_entry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    time_range = update.message.text
+    user = update.message.from_user
+    last_name = user.last_name or user.first_name or ""
     
-    if 'edit_date' not in context.user_data:
+    success, deleted_data = excel_manager.delete_today_entry(user_id, last_name)
+    
+    if success:
+        yandex_sync_text = ""
+        if yandex_disk:
+            yandex_sync_text = "\n☁️ *Изменения сохранены на Яндекс.Диск*"
+            
         await update.message.reply_text(
-            "❌ Сессия истекла. Начните заново.",
+            "🗑️ *Запись за сегодня успешно удалена!*\n"
+            f"{yandex_sync_text}\n\n"
+            f"📅 *Дата:* {deleted_data['date']}\n"
+            f"🕐 *Время работы:* {deleted_data['time_range']}\n"
+            f"📝 *Описание:* {deleted_data['description']}\n"
+            f"⏱️ *Часы работы:* {deleted_data['work_hours']} ч.\n"
+            f"📊 *Статус:* {deleted_data['status']}\n\n"
+            "Теперь ты можешь создать новую запись через кнопку \"📝 Отчет\"\n"
+            "Или заполнить пропущенные дни через \"✏️ Редактировать\"",
+            parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
-        return ConversationHandler.END
-    
-    # Сохраняем время в контексте
-    context.user_data['edit_time_range'] = time_range
-    
-    total_hours = excel_manager.calculate_work_hours(time_range, had_lunch=False)
-    
-    await update.message.reply_text(
-        f"✅ *Отлично!*\n"
-        f"⏱️ *Общее время работы:* {total_hours:.2f} ч.\n"
-        "🍽️ *Был ли у тебя обед в этот день?*\n"
-        "(Обед = вычет 0.5 часа)",
-        reply_markup=get_yes_no_keyboard()
-    )
-    return WAITING_EDIT_LUNCH
-
-async def receive_edit_lunch(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение информации об обеде при редактировании"""
-    user_id = update.message.from_user.id
-    text = update.message.text.strip().lower()
-    
-    if text in ["да", "yes", "д"]:
-        had_lunch = True
-    elif text in ["нет", "no", "н"]:
-        had_lunch = False
     else:
-        await update.message.reply_text("Пожалуйста, выбери «Да» или «Нет».", reply_markup=get_yes_no_keyboard())
-        return WAITING_EDIT_LUNCH
-    
-    if 'edit_date' not in context.user_data or 'edit_time_range' not in context.user_data:
         await update.message.reply_text(
-            "❌ Сессия истекла. Начните заново.",
+            "❌ *Не найдено записей за сегодня для удаления.*\n\n"
+            "Сначала создайте запись через кнопку \"📝 Отчет\"",
+            parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
-        return ConversationHandler.END
-    
-    # Сохраняем информацию об обеде
-    context.user_data['edit_had_lunch'] = had_lunch
-    
-    selected_date = context.user_data['edit_date']
+
+async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принудительная синхронизация с Яндекс.Диском"""
+    if not yandex_disk:
+        await update.message.reply_text(
+            "❌ *Синхронизация с Яндекс.Диском отключена.*\n\n"
+            "Для включения:\n"
+            "1. Получите OAuth-токен Яндекс.Диск\n"
+            "2. Установите переменную YANDEX_DISK_TOKEN\n"
+            "3. Перезапустите бота",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
     
     await update.message.reply_text(
-        f"📝 *ШАГ 2:* Опиши ОПИСАНИЕ РАБОТЫ за {selected_date}:\n"
-        "*Примеры:*\n"
-        "• Разрабатывал новый функционал\n"
-        "• Участвовал в совещаниях\n"
-        "• Изучал документацию\n"
-        "• Исправлял ошибки\n"
-        "• Общался с клиентами",
+        "☁️ *Проверяю подключение к Яндекс.Диску...*",
         parse_mode='Markdown',
         reply_markup=ReplyKeyboardRemove()
     )
-    return WAITING_EDIT_DESCRIPTION
+    
+    try:
+        # Проверяем существование папки
+        if not yandex_disk.check_folder_exists(YANDEX_DISK_FOLDER):
+            await update.message.reply_text(
+                f"❌ *Папка не найдена на Яндекс.Диске!*\n\n"
+                f"Создайте папку вручную:\n"
+                f"`{YANDEX_DISK_FOLDER}`\n\n"
+                f"После создания попробуйте снова.",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
 
-async def receive_edit_description(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение описания работы при редактировании"""
-    user_id = update.message.from_user.id
-    description = update.message.text
-    
-    if not all(key in context.user_data for key in ['edit_date', 'edit_time_range', 'edit_had_lunch']):
+        remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
+        
+        if yandex_disk.upload_file(EXCEL_FILE, remote_file_path):
+            file_info = yandex_disk.get_file_info(remote_file_path)
+            if file_info:
+                file_size = file_info.get('size', 0)
+                modified = file_info.get('modified', '')
+                await update.message.reply_text(
+                    f"✅ *Синхронизация успешно завершена!*\n\n"
+                    f"📊 *Данные файла на Яндекс.Диске:*\n"
+                    f"• 📁 Размер: {int(file_size) / 1024 / 1024:.2f} MB\n"
+                    f"• 📅 Обновлен: {modified[:19] if modified else 'Неизвестно'}\n"
+                    f"• 🔗 Путь: {remote_file_path}\n\n"
+                    f"Все данные надежно сохранены в облаке! ☁️",
+                    parse_mode='Markdown',
+                    reply_markup=get_main_menu_keyboard()
+                )
+            else:
+                await update.message.reply_text(
+                    "✅ *Файл загружен на Яндекс.Диск!*\n\n"
+                    f"Резервная копия успешно сохранена в папке:\n"
+                    f"`{remote_file_path}`\n\n"
+                    "Все данные надежно сохранены в облаке! ☁️",
+                    parse_mode='Markdown',
+                    reply_markup=get_main_menu_keyboard()
+                )
+        else:
+            await update.message.reply_text(
+                "❌ *Ошибка синхронизации!*\n\n"
+                "Не удалось загрузить файл на Яндекс.Диск. "
+                "Проверьте:\n"
+                "1. Существует ли папка на Яндекс.Диске\n"
+                "2. Правильность OAuth-токена\n"
+                "3. Достаточно ли места на диске",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu_keyboard()
+            )
+            
+    except Exception as e:
+        print(f"❌ Ошибка при синхронизации: {e}")
         await update.message.reply_text(
-            "❌ Недостаточно данных. Начните заново.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    selected_date = context.user_data['edit_date']
-    time_range = context.user_data['edit_time_range']
-    had_lunch = context.user_data['edit_had_lunch']
-    
-    user = update.message.from_user
-    last_name = user.last_name or user.first_name or ""
-    
-    success, result, row_num = excel_manager.add_entry(
-        user_id, selected_date, time_range, description, had_lunch, last_name
-    )
-    
-    if success:
-        stats = excel_manager.get_user_stats(user_id, last_name)
-        work_hours = excel_manager.calculate_work_hours(time_range, had_lunch)
-        
-        yandex_sync_text = ""
-        if yandex_disk:
-            yandex_sync_text = "☁️ *Данные автоматически сохранены на Яндекс.Диск*\n"
-        
-        # Получаем день недели
-        date_obj = datetime.strptime(selected_date, "%d.%m.%Y")
-        weekday = excel_manager._get_weekday_name(date_obj)
-        
-        message_text = (
-            f"🎉 *ЗАПИСЬ ЗА {selected_date} ОБНОВЛЕНА!*\n"
-            f"{yandex_sync_text}\n"
-            f"📅 *Дата:* {selected_date} ({weekday})\n"
-            f"🕐 *Время работы:* {time_range}\n"
-            f"🍽️ *Обед:* {'Да' if had_lunch else 'Нет'}\n"
-            f"⏱️ *Часы работы без обеда:* {work_hours:.2f} ч.\n"
-            f"📝 *Описание работы:* {description}\n\n"
-            f"📊 *СТАТИСТИКА:*\n"
-            f"• 📅 Всего дней: {stats['total_days']}\n"
-            f"• ✅ Заполнено: {stats['filled_days']}\n"
-            f"• 📈 Заполнение: {stats['completion_rate']}%\n\n"
-            "*Вы можете:*\n"
-            "• ✏️ *Редактировать* другие дни\n"
-            "• 📅 *Посмотреть календарь*\n"
-            "• 📥 *Скачать полный отчет*"
-        )
-        
-        await update.message.reply_text(
-            message_text,
+            "❌ *Произошла ошибка при синхронизации!*\n\n"
+            "Попробуйте позже или проверьте настройки Яндекс.Диска.",
             parse_mode='Markdown',
             reply_markup=get_main_menu_keyboard()
         )
-    else:
-        await update.message.reply_text(
-            "❌ Произошла ошибка при сохранении. Попробуйте еще раз.",
-            reply_markup=get_main_menu_keyboard()
-        )
-    
-    # Очищаем контекст
-    context.user_data.clear()
-    
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id in user_data_cache:
+        del user_data_cache[user_id]
+    await update.message.reply_text("❌ Диалог отменен.", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
-
-async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаление записи за сегодня"""
-    user_id = update.message.from_user.id
-    user = update.message.from_user
-    last_name = user.last_name or user.first_name or ""
-    
-    today_str = datetime.now().strftime("%d.%m.%Y")
-    
-    # Для удаления просто обнуляем запись (делаем ее пропущенной)
-    success, result, row_num = excel_manager.add_entry(user_id, today_str, "", "", False, last_name)
-    
-    if success:
-        await update.message.reply_text(
-            f"🗑️ *ЗАПИСЬ ЗА СЕГОДНЯ ({today_str}) УДАЛЕНА!*\n\n"
-            "День помечен как пропущенный.\n"
-            "Вы можете заполнить его заново через кнопку '📝 Отчет' или '✏️ Редактировать'.",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ *Не найдено записей за сегодня ({today_str}).*\n\n"
-            "Сначала создайте запись через кнопку '📝 Отчет'.",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-
-# Остальные функции (reminder_command, download_file, sync_to_yandex_disk и т.д.)
-# остаются такими же, но добавлю недостающие функции
 
 async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -1366,11 +1208,16 @@ async def send_daily_reminder(context):
                 f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
                 f"Привет! Я вижу, что ты уже заполнил отчет за сегодня. ✅\n\n"
                 f"Если нужно что-то исправить:\n"
-                f"1️⃣ Нажми '✏️ Редактировать'\n"
-                f"2️⃣ Введи сегодняшнюю дату\n"
-                f"3️⃣ Исправь данные"
+                f"1️⃣ Нажми '🗑️ Удалить запись'\n"
+                f"2️⃣ Затем создай новую через '📝 Отчет'\n\n"
+                f"Или заполни пропущенные дни через '✏️ Редактировать'"
             )
         else:
+            stats = excel_manager.get_user_stats(user_id, last_name)
+            missed_days_text = ""
+            if stats['missed'] > 0:
+                missed_days_text = f"\n📅 *У тебя есть {stats['missed']} пропущенных дней* (заполни через '✏️ Редактировать')"
+            
             message_text = (
                 f"🕔 *ЕЖЕДНЕВНОЕ НАПОМИНАНИЕ ({reminder_time_str})!*\n"
                 f"Привет! Пора заполнить отчет о работе за сегодня.\n"
@@ -1379,6 +1226,7 @@ async def send_daily_reminder(context):
                 f"2️⃣ Был ли обед\n"
                 f"3️⃣ Что ты делал\n"
                 f"Это займет всего 30 секунд! ⏱️"
+                f"{missed_days_text}"
             )
             
         await context.bot.send_message(
@@ -1403,17 +1251,24 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         yandex_status = ""
         if yandex_disk:
             yandex_status = "\n☁️ *Резервная копия хранится на Яндекс.Диске*"
+        
+        stats = excel_manager.get_user_stats(update.message.from_user.id, 
+                                           update.message.from_user.last_name or update.message.from_user.first_name or "")
             
         with open(EXCEL_FILE, 'rb') as file:
             await update.message.reply_document(
                 document=file,
                 filename=f"work_reports_{datetime.now().strftime('%d.%m.%Y')}.xlsx",
                 caption=f"📊 *Вот твой файл с отчетами!*\n"
-                       f"Файл содержит:\n"
-                       f"• Все записи о рабочем времени\n"
-                       f"• Пустые строки для пропущенных дней\n"
-                       f"• Календарные данные по месяцам\n"
-                       f"• Индивидуальные листы для каждого пользователя\n"
+                       f"📈 *Статистика:*\n"
+                       f"• ✅ Заполнено: {stats['filled']} дней\n"
+                       f"• 📅 Пропущено: {stats['missed']} дней\n"
+                       f"• 📋 Всего: {stats['total']} дней\n\n"
+                       f"Файл содержит все записи о рабочем времени.\n"
+                       f"Каждый пользователь имеет свой лист в файле.\n"
+                       f"*Новые возможности:*\n"
+                       f"• Автоматические пустые строки за пропущенные дни\n"
+                       f"• Возможность заполнить пропущенные дни"
                        f"{yandex_status}",
                 parse_mode='Markdown',
                 reply_markup=get_main_menu_keyboard()
@@ -1426,104 +1281,13 @@ async def download_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_menu_keyboard()
         )
 
-async def sync_to_yandex_disk(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Принудительная синхронизация с Яндекс.Диском"""
-    if not yandex_disk:
-        await update.message.reply_text(
-            "❌ *Синхронизация с Яндекс.Диском отключена.*\n\n"
-            "Для включения:\n"
-            "1. Получите OAuth-токен Яндекс.Диск\n"
-            "2. Установите переменную YANDEX_DISK_TOKEN\n"
-            "3. Перезапустите бота",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-    
-    await update.message.reply_text(
-        "☁️ *Проверяю подключение к Яндекс.Диску...*",
-        parse_mode='Markdown',
-        reply_markup=ReplyKeyboardRemove()
-    )
-    
-    try:
-        # Проверяем существование папки
-        if not yandex_disk.check_folder_exists(YANDEX_DISK_FOLDER):
-            await update.message.reply_text(
-                f"❌ *Папка не найдена на Яндекс.Диске!*\n\n"
-                f"Создайте папку вручную:\n"
-                f"`{YANDEX_DISK_FOLDER}`\n\n"
-                f"После создания попробуйте снова.",
-                parse_mode='Markdown',
-                reply_markup=get_main_menu_keyboard()
-            )
-            return
-
-        remote_file_path = f"{YANDEX_DISK_FOLDER}/work_tracker_backup.xlsx"
-        
-        if yandex_disk.upload_file(EXCEL_FILE, remote_file_path):
-            file_info = yandex_disk.get_file_info(remote_file_path)
-            if file_info:
-                file_size = file_info.get('size', 0)
-                modified = file_info.get('modified', '')
-                await update.message.reply_text(
-                    f"✅ *Синхронизация успешно завершена!*\n\n"
-                    f"📊 *Данные файла на Яндекс.Диске:*\n"
-                    f"• 📁 Размер: {int(file_size) / 1024 / 1024:.2f} MB\n"
-                    f"• 📅 Обновлен: {modified[:19] if modified else 'Неизвестно'}\n"
-                    f"• 🔗 Путь: {remote_file_path}\n\n"
-                    f"Все данные надежно сохранены в облаке! ☁️",
-                    parse_mode='Markdown',
-                    reply_markup=get_main_menu_keyboard()
-                )
-            else:
-                await update.message.reply_text(
-                    "✅ *Файл загружен на Яндекс.Диск!*\n\n"
-                    f"Резервная копия успешно сохранена в папке:\n"
-                    f"`{remote_file_path}`\n\n"
-                    "Все данные надежно сохранены в облаке! ☁️",
-                    parse_mode='Markdown',
-                    reply_markup=get_main_menu_keyboard()
-                )
-        else:
-            await update.message.reply_text(
-                "❌ *Ошибка синхронизации!*\n\n"
-                "Не удалось загрузить файл на Яндекс.Диск. "
-                "Проверьте:\n"
-                "1. Существует ли папка на Яндекс.Диске\n"
-                "2. Правильность OAuth-токена\n"
-                "3. Достаточно ли места на диске",
-                parse_mode='Markdown',
-                reply_markup=get_main_menu_keyboard()
-            )
-            
-    except Exception as e:
-        print(f"❌ Ошибка при синхронизации: {e}")
-        await update.message.reply_text(
-            "❌ *Произошла ошибка при синхронизации!*\n\n"
-            "Попробуйте позже или проверьте настройки Яндекс.Диска.",
-            parse_mode='Markdown',
-            reply_markup=get_main_menu_keyboard()
-        )
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id in user_data_cache:
-        del user_data_cache[user_id]
-    # Очищаем контекст редактирования
-    if context.user_data:
-        context.user_data.clear()
-    await update.message.reply_text("❌ Операция отменена.", reply_markup=get_main_menu_keyboard())
-    return ConversationHandler.END
-
 async def handle_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❌ *Неизвестная команда.*\n"
         "*Используй кнопки меню:*\n"
         "📝 Отчет - добавить запись о работе\n"
-        "✏️ Редактировать - заполнить пропущенный день\n"
+        "✏️ Редактировать - заполнить отчеты за пропущенные дни\n"
         "🗑️ Удалить запись - удалить сегодняшнюю запись\n"
-        "📅 Календарь - посмотреть календарь с часами\n"
         "⚙️ Напоминание - изменить время напоминания\n"
         "📥 Скачать отчет - получить Excel файл\n"
         "☁️ Синхронизировать - принудительно сохранить на Яндекс.Диск",
@@ -1556,16 +1320,17 @@ def restore_reminders(application: Application):
 
 def main():
     global global_app
-    print("🚀 ЗАПУСК УЛУЧШЕННОГО WORK TRACKER BOT...")
-    print("📊 Бот для учета рабочего времени с календарем")
+    print("🚀 Запуск Work Tracker Bot...")
+    print("📊 Бот для учета рабочего времени")
     print("💾 Excel файл:", EXCEL_FILE)
-    print("⏱️ Автоматические пустые строки для пропущенных дней")
-    print("✏️ Редактирование пропущенных дней")
-    print("📅 Календарная таблица с визуализацией часов")
+    print("⏱️ Поддержка нескольких периодов + выбор обеда")
+    print("📝 Ограничение: 1 запись в день на пользователя")
+    print(f"📅 История пропущенных дней: {MISSED_DAYS_HISTORY} дней")
     print(f"☁️  Яндекс.Диск: {'ВКЛЮЧЕН' if yandex_disk else 'ВЫКЛЮЧЕН'}")
     
     if yandex_disk:
         print(f"📂 Папка на Яндекс.Диске: {YANDEX_DISK_FOLDER}")
+        # Проверяем существование папки при запуске
         if yandex_disk.check_folder_exists(YANDEX_DISK_FOLDER):
             print(f"✅ Папка существует на Яндекс.Диске")
         else:
@@ -1574,7 +1339,7 @@ def main():
     application = Application.builder().token(BOT_TOKEN).build()
     global_app = application
 
-    # Обычный отчет (быстрый, за сегодня)
+    # Conversation handler для обычного отчета
     report_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("report", report_command),
@@ -1588,22 +1353,7 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)]
     )
 
-    # Редактирование пропущенных дней
-    edit_conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("edit", edit_command),
-            MessageHandler(filters.Regex("^(✏️ Редактировать)$"), edit_command)
-        ],
-        states={
-            WAITING_EDIT_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_date)],
-            WAITING_EDIT_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_time)],
-            WAITING_EDIT_LUNCH: [MessageHandler(filters.Regex("^(Да|Нет)$"), receive_edit_lunch)],
-            WAITING_EDIT_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_edit_description)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-
-    # Напоминания
+    # Conversation handler для напоминаний
     reminder_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("reminder", reminder_command),
@@ -1615,21 +1365,32 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)]
     )
 
-    # Основные обработчики
+    # ✅ Conversation handler для редактирования пропущенных дней
+    edit_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("edit", edit_missed_days_command),
+            MessageHandler(filters.Regex("^(✏️ Редактировать)$"), edit_missed_days_command)
+        ],
+        states={
+            WAITING_MISSED_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_missed_date)],
+            WAITING_MISSED_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_missed_time)],
+            WAITING_MISSED_LUNCH: [MessageHandler(filters.Regex("^(Да|Нет)$"), receive_missed_lunch)],
+            WAITING_MISSED_DESCRIPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_missed_description)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_missed_entry)]
+    )
+
+    # Добавляем все обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("download", download_file))
-    application.add_handler(CommandHandler("delete", delete_command))
+    application.add_handler(CommandHandler("delete", delete_entry_command))
     application.add_handler(CommandHandler("sync", sync_to_yandex_disk))
-    
-    application.add_handler(MessageHandler(filters.Regex("^(🗑️ Удалить запись)$"), delete_command))
-    application.add_handler(MessageHandler(filters.Regex("^(📅 Календарь)$"), calendar_command))
+    application.add_handler(MessageHandler(filters.Regex("^(🗑️ Удалить запись)$"), delete_entry_command))
     application.add_handler(MessageHandler(filters.Regex("^(📥 Скачать отчет)$"), download_file))
     application.add_handler(MessageHandler(filters.Regex("^(☁️ Синхронизировать)$"), sync_to_yandex_disk))
-    
     application.add_handler(report_conv_handler)
-    application.add_handler(edit_conv_handler)
     application.add_handler(reminder_conv_handler)
-    
+    application.add_handler(edit_conv_handler)  # ✅ Новый обработчик
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons))
     application.add_handler(MessageHandler(filters.COMMAND, handle_unknown_command))
 
@@ -1637,12 +1398,6 @@ def main():
 
     print("✅ Бот успешно запущен!")
     print("📱 Ожидаем сообщения от пользователей...")
-    print("🎯 Новые возможности:")
-    print("   • Автоматические пустые строки для пропущенных дней")
-    print("   • Редактирование пропущенных дней")
-    print("   • Календарная таблица с визуализацией часов")
-    print("   • Подробная статистика по месяцам")
-    
     try:
         application.run_polling()
     except KeyboardInterrupt:
