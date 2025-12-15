@@ -1,6 +1,5 @@
 import os
-from datetime import time, datetime, timedelta
-from typing import Dict, Any
+from datetime import time
 
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI')
 
@@ -18,7 +17,7 @@ EXCEL_FILE = os.path.join(EXCEL_DIR, "work_tracker_new.xlsx")
 
 DEFAULT_REMINDER_HOUR = 18
 DEFAULT_REMINDER_MINUTE = 0
-USER_SETTINGS: Dict[int, Dict[str, Any]] = {}
+USER_SETTINGS = {}
 WELCOMED_USERS = set()
 
 # ✅ Новые константы для ограничения записей
@@ -31,6 +30,9 @@ YANDEX_DISK_TOKEN = os.getenv('YANDEX_DISK_TOKEN', '')  # OAuth-токен Ян�
 # ✅ Укажите путь к СУЩЕСТВУЮЩЕЙ папке на Яндекс.Диске
 YANDEX_DISK_FOLDER = "/PolitechCNC/Планирование и загрузка /Планирование"
 
+# ✅ Новые константы для редактирования пропущенных дней
+MISSED_DAYS_HISTORY = 30  # За сколько дней назад можно редактировать
+
 print("🚀 Конфигурация Work Tracker Bot:")
 print(f"✅ BOT_TOKEN: {'Установлен' if BOT_TOKEN and BOT_TOKEN != '8108841583:AAHNAxCDantgG51JfjyBmDdaubVFWiDHvyI' else 'ПРОВЕРЬТЕ НАСТРОЙКИ'}")
 print(f"📁 Используемая папка: {EXCEL_DIR}")
@@ -38,6 +40,7 @@ print(f"💾 Файл данных: {EXCEL_FILE}")
 print(f"🔧 Папка существует: {os.path.exists(EXCEL_DIR)}")
 print(f"🔧 Можно писать в папку: {os.access(EXCEL_DIR, os.W_OK) if os.path.exists(EXCEL_DIR) else 'НЕТ'}")
 print(f"📊 Максимум записей в день: {MAX_ENTRIES_PER_DAY}")
+print(f"📅 История пропущенных дней: {MISSED_DAYS_HISTORY} дней")
 print(f"☁️  Яндекс.Диск: {'ВКЛЮЧЕН' if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN else 'ВЫКЛЮЧЕН'}")
 if YANDEX_DISK_ENABLED and YANDEX_DISK_TOKEN:
     print(f"📂 Папка на Яндекс.Диске: {YANDEX_DISK_FOLDER}")
